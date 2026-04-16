@@ -110,6 +110,32 @@ local function createMockPencil(options)
         { name = "Gray", color = MockBlitbuffer.Color8(0x88) },
     }
 
+    -- Experimental pen width picker (off by default). When enabled,
+    -- available_widths is appended to the picker's item list.
+    mock.experimental_pen_width = options.experimental_pen_width or false
+    mock.available_widths = {
+        { name = "w3", width = 3 },
+        { name = "w5", width = 5 },
+        { name = "w7", width = 7 },
+        { name = "w9", width = 9 },
+    }
+
+    -- Mirrors ColorPickerWidget:init's item-list construction so tests can
+    -- assert what the picker actually receives without reaching into the
+    -- widget's rendering internals.
+    function mock:buildPickerItems()
+        local items = {}
+        for _, c in ipairs(self.available_colors) do
+            table.insert(items, { kind = "color", name = c.name, color_value = c.color })
+        end
+        if self.experimental_pen_width then
+            for _, w in ipairs(self.available_widths) do
+                table.insert(items, { kind = "width", name = w.name, width_value = w.width })
+            end
+        end
+        return items
+    end
+
     -- Set pen color
     function mock:setPenColor(color, color_name)
         self.tool_settings[TOOL_PEN].color = color
@@ -551,6 +577,55 @@ describe("color picker widget", function()
 
         assert.is_false(pencil.color_picker_showing)
         assert.is_nil(pencil.color_picker_widget)
+    end)
+
+    describe("item list gating (experimental pen width)", function()
+
+        it("includes only colors when experimental_pen_width is off", function()
+            local pencil = createMockPencil({ experimental_pen_width = false })
+
+            local items = pencil:buildPickerItems()
+
+            assert.equals(#pencil.available_colors, #items)
+            for _, item in ipairs(items) do
+                assert.equals("color", item.kind)
+            end
+        end)
+
+        it("always includes the full color list regardless of flag", function()
+            -- Black must not be omitted or shadowed by width items when the
+            -- experimental flag is on — the width row is strictly additive.
+            local off = createMockPencil({ experimental_pen_width = false })
+            local on = createMockPencil({ experimental_pen_width = true })
+
+            local function color_names(items)
+                local names = {}
+                for _, item in ipairs(items) do
+                    if item.kind == "color" then
+                        table.insert(names, item.name)
+                    end
+                end
+                return names
+            end
+
+            assert.same(color_names(off:buildPickerItems()), color_names(on:buildPickerItems()))
+        end)
+
+        it("appends width items only when experimental_pen_width is on", function()
+            local pencil = createMockPencil({ experimental_pen_width = true })
+
+            local items = pencil:buildPickerItems()
+
+            assert.equals(
+                #pencil.available_colors + #pencil.available_widths,
+                #items
+            )
+            -- Width items live at the tail of the list, after colors
+            local tail = items[#items]
+            assert.equals("width", tail.kind)
+            assert.equals(9, tail.width_value)
+        end)
+
     end)
 
 end)

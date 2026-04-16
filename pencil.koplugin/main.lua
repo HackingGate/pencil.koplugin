@@ -141,6 +141,15 @@ function Pencil:init()
         { name = "Gray", color = Blitbuffer.Color8(gray_value) },
     }
 
+    -- Available pen widths for the optional experimental width picker.
+    -- Gated by self.experimental_pen_width; see loadSettings().
+    self.available_widths = {
+        { name = "w3", width = 3 },
+        { name = "w5", width = 5 },
+        { name = "w7", width = 7 },
+        { name = "w9", width = 9 },
+    }
+
     -- Load tool and stylus button settings
     self:loadSettings()
 
@@ -717,6 +726,7 @@ function Pencil:loadSettings()
     self.input_debug_mode = settings.input_debug_mode or false
     -- Experimental features
     self.experimental_bookmark_sync = settings.experimental_bookmark_sync or false
+    self.experimental_pen_width = settings.experimental_pen_width or false
     -- Load pen color by name and look up the actual color value
     local color_name = settings.pen_color_name
     if color_name then
@@ -728,6 +738,18 @@ function Pencil:loadSettings()
             end
         end
     end
+    -- Load pen width if previously chosen via the experimental width picker.
+    -- Validated against available_widths so a malformed settings file can't
+    -- inject arbitrary widths.
+    local saved_width = settings.pen_width
+    if saved_width then
+        for _, w in ipairs(self.available_widths) do
+            if w.width == saved_width then
+                self.tool_settings[TOOL_PEN].width = saved_width
+                break
+            end
+        end
+    end
 end
 
 -- Save plugin settings
@@ -735,7 +757,9 @@ function Pencil:saveSettings()
     G_reader_settings:saveSetting("pencil_annotation_settings", {
         input_debug_mode = self.input_debug_mode,
         experimental_bookmark_sync = self.experimental_bookmark_sync,
+        experimental_pen_width = self.experimental_pen_width,
         pen_color_name = self.tool_settings[TOOL_PEN].color_name,
+        pen_width = self.tool_settings[TOOL_PEN].width,
     })
 end
 
@@ -867,6 +891,28 @@ function Pencil:addToMainMenu(menu_items)
                                 UIManager:show(InfoMessage:new{
                                     text = _("Bookmark sync disabled. Pencil bookmarks removed."),
                                     timeout = 3,
+                                })
+                            end
+                        end,
+                    },
+                    {
+                        text = _("Pen width picker"),
+                        help_text = _("Add pen width options (3, 5, 7, 9) to the color picker. The width buttons appear as black dots whose size previews the stroke thickness."),
+                        checked_func = function()
+                            return self.experimental_pen_width
+                        end,
+                        callback = function()
+                            self.experimental_pen_width = not self.experimental_pen_width
+                            self:saveSettings()
+                            if self.experimental_pen_width then
+                                UIManager:show(InfoMessage:new{
+                                    text = _("Pen width picker enabled. Hold the pen still to open the picker and choose a stroke width."),
+                                    timeout = 3,
+                                })
+                            else
+                                UIManager:show(InfoMessage:new{
+                                    text = _("Pen width picker disabled."),
+                                    timeout = 2,
                                 })
                             end
                         end,
@@ -1392,12 +1438,15 @@ function Pencil:cancelColorPickerTimer()
     self:resetColorPickerTracking()
 end
 
--- Color picker widget for selecting pen color
+-- Color picker widget for selecting pen color (and optionally pen width).
+-- Width items are appended after colors in the same row when `widths` is set.
 local ColorPickerWidget = InputContainer:extend {
     width = nil,
     height = nil,
     colors = nil, -- Array of {color, name} objects
+    widths = nil, -- Optional array of {name, width} objects (experimental width picker)
     current_color_name = nil, -- Currently selected color name (for comparison)
+    current_width = nil, -- Currently selected pen width (for width selection indicator)
     callback = nil,
     close_callback = nil,
 }
@@ -1408,74 +1457,135 @@ function ColorPickerWidget:init()
     local padding = Screen:scaleBySize(10)
     local selection_border = Size.border.thick * 3  -- Thicker border for selected color
 
-    -- Calculate width dynamically based on number of colors
-    local num_colors = #self.colors
-    local buttons_width = num_colors * button_size + (num_colors - 1) * spacing
-    -- Width is just buttons - FrameContainer adds padding on all sides
+    -- Build the combined item list: colors first, then (optionally) widths.
+    -- This is the single source of truth used by both rendering and tap routing
+    -- so the two cannot drift out of sync.
+    local items = {}
+    for _, color_info in ipairs(self.colors) do
+        table.insert(items, {
+            kind = "color",
+            name = color_info.name,
+            color_value = color_info.color,
+        })
+    end
+    if self.widths then
+        for _, width_info in ipairs(self.widths) do
+            table.insert(items, {
+                kind = "width",
+                name = width_info.name,
+                width_value = width_info.width,
+            })
+        end
+    end
+
+    -- Calculate picker width from the combined item count
+    local num_buttons = #items
+    local buttons_width = num_buttons * button_size + (num_buttons - 1) * spacing
     self.width = buttons_width
     self.height = button_size  -- FrameContainer adds equal padding all sides
 
     -- Store button info for later position update
     self.color_buttons_info = {}
 
-    -- Create color buttons
+    -- Create buttons row (colors + optional widths)
     local color_buttons = HorizontalGroup:new{ align = "center" }
 
-    for i, color_info in ipairs(self.colors) do
+    for i, item in ipairs(items) do
         if i > 1 then
             table.insert(color_buttons, HorizontalSpan:new{ width = spacing })
         end
 
-        -- Check if this color is currently selected (compare by name)
-        local is_selected = (color_info.name == self.current_color_name)
+        -- Selection: colors compare by name, widths compare by width value
+        local is_selected
+        if item.kind == "width" then
+            is_selected = (item.width_value == self.current_width)
+        else
+            is_selected = (item.name == self.current_color_name)
+        end
         local border_size = is_selected and selection_border or Size.border.thick
 
-        -- Use dark gray border for Black color so selection is visible, true black for others
-        local border_color = Blitbuffer.COLOR_BLACK
-        if color_info.name == "Black" then
-            border_color = Blitbuffer.Color8(0x44)
+        local swatch
+        if item.kind == "width" then
+            -- Width preview: white background with a centered black dot sized
+            -- to the actual stroke width. Caps at ~60% of button interior so
+            -- even the largest width leaves a visible white ring.
+            local inner = button_size - border_size * 2
+            local dot_size = math.min(inner - 4, item.width_value * Screen:scaleBySize(3))
+            if dot_size < Screen:scaleBySize(3) then
+                dot_size = Screen:scaleBySize(3)
+            end
+            local dot = FrameContainer:new{
+                width = dot_size,
+                height = dot_size,
+                padding = 0,
+                margin = 0,
+                bordersize = 0,
+                background = Blitbuffer.COLOR_BLACK,
+                WidgetContainer:new{
+                    dimen = Geom:new{ w = dot_size, h = dot_size },
+                },
+            }
+            swatch = FrameContainer:new{
+                width = button_size,
+                height = button_size,
+                padding = 0,
+                margin = 0,
+                bordersize = border_size,
+                color = Blitbuffer.COLOR_BLACK,
+                background = Blitbuffer.COLOR_WHITE,
+                CenterContainer:new{
+                    dimen = Geom:new{ w = inner, h = inner },
+                    dot,
+                },
+            }
+        else
+            -- Regular color swatch
+            local border_color = Blitbuffer.COLOR_BLACK
+            if item.name == "Black" then
+                border_color = Blitbuffer.Color8(0x44)
+            end
+            swatch = FrameContainer:new{
+                width = button_size,
+                height = button_size,
+                padding = 0,
+                margin = 0,
+                bordersize = border_size,
+                color = border_color,
+                background = item.color_value,
+                WidgetContainer:new{
+                    dimen = Geom:new{ w = button_size - border_size * 2, h = button_size - border_size * 2 },
+                },
+            }
+            if Screen.night_mode and item.name ~= "Black" and item.name ~= "Gray" then
+                swatch.background = swatch.background:invert()
+            end
         end
 
-        -- Create a color swatch button
-        local color_swatch = FrameContainer:new{
-            width = button_size,
-            height = button_size,
-            padding = 0,
-            margin = 0,
-            bordersize = border_size,
-            color = border_color,
-            background = color_info.color,
-            WidgetContainer:new{
-                dimen = Geom:new{ w = button_size - border_size * 2, h = button_size - border_size * 2 },
-            },
-        }
-
-        -- Reinvert color in night mode (if it's not black or gray)
-        if Screen.night_mode and color_info.name ~= "Black" and color_info.name ~= "Gray" then
-            color_swatch.background = color_swatch.background:invert()
-        end
-
-        -- Wrap in InputContainer to handle taps
-        local color_button = InputContainer:new{
+        -- Wrap in InputContainer to handle taps. The button keeps its full
+        -- item metadata so the callback can distinguish color vs width
+        -- without string-matching the name.
+        local button = InputContainer:new{
             dimen = Geom:new{ w = button_size, h = button_size },
-            color_swatch,
-            color_value = color_info.color,  -- Store Blitbuffer color
-            color_name = color_info.name,    -- Store name for display/persistence
+            swatch,
+            kind = item.kind,
+            color_value = item.color_value,  -- nil for width items
+            color_name = item.name,
+            width_value = item.width_value,  -- nil for color items
         }
 
-        color_button.ges_events = {
+        button.ges_events = {
             TapSelectColor = {
                 GestureRange:new{
                     ges = "tap",
-                    range = function() return color_button.dimen end,
+                    range = function() return button.dimen end,
                 },
             },
         }
 
         local widget = self
-        color_button.onTapSelectColor = function(btn)
+        button.onTapSelectColor = function(btn)
             if widget.callback then
-                widget.callback(btn.color_value, btn.color_name)
+                widget.callback(btn.color_value, btn.color_name, btn.width_value)
             end
             if widget.close_callback then
                 widget.close_callback()
@@ -1483,8 +1593,8 @@ function ColorPickerWidget:init()
             return true
         end
 
-        table.insert(color_buttons, color_button)
-        table.insert(self.color_buttons_info, color_button)
+        table.insert(color_buttons, button)
+        table.insert(self.color_buttons_info, button)
     end
 
     -- Create the frame - FrameContainer adds equal padding on all sides
@@ -1568,7 +1678,7 @@ function ColorPickerWidget:handlePenTap(x, y)
             if pos_in_slot < button_size and button_index >= 1 and button_index <= num_buttons then
                 local btn = self.color_buttons_info[button_index]
                 if btn and self.callback then
-                    self.callback(btn.color_value, btn.color_name)
+                    self.callback(btn.color_value, btn.color_name, btn.width_value)
                 end
                 if self.close_callback then
                     self.close_callback()
@@ -1652,14 +1762,18 @@ function Pencil:showColorPicker(x, y)
 
     local plugin = self
 
-    -- Calculate picker size based on number of colors
+    -- Include the width row only when the experimental toggle is on
+    local show_widths = self.experimental_pen_width
+    local widths_for_picker = show_widths and self.available_widths or nil
+
+    -- Calculate picker size based on total button count (colors + optional widths)
     local button_size = Screen:scaleBySize(36)
     local spacing = Screen:scaleBySize(8)
     local padding = Screen:scaleBySize(10)
     local border = Size.border.window
-    local num_colors = #self.available_colors
+    local num_buttons = #self.available_colors + (show_widths and #self.available_widths or 0)
     -- Width/height = buttons + FrameContainer padding (equal on all sides) + borders
-    local buttons_width = num_colors * button_size + (num_colors - 1) * spacing
+    local buttons_width = num_buttons * button_size + (num_buttons - 1) * spacing
     local picker_width = buttons_width + padding * 2 + border * 2
     local picker_height = button_size + padding * 2 + border * 2
     local margin_above = Screen:scaleBySize(30)  -- Gap between picker and pen
@@ -1689,8 +1803,21 @@ function Pencil:showColorPicker(x, y)
 
     local color_picker = ColorPickerWidget:new{
         colors = self.available_colors,
+        widths = widths_for_picker,
         current_color_name = self.tool_settings[TOOL_PEN].color_name,
-        callback = function(color_value, color_name)
+        current_width = self.tool_settings[TOOL_PEN].width,
+        callback = function(color_value, color_name, width_value)
+            -- Width taps are routed through width_value; color taps leave it nil.
+            -- This avoids the string-match ambiguity the earlier prototype had.
+            if width_value then
+                plugin:setPenWidth(width_value)
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Pen width: %1"), width_value),
+                    timeout = 1,
+                })
+                return
+            end
+
             plugin:setPenColor(color_value, color_name)
 
             -- Display white as the color name if black is picked in night mode
@@ -1731,6 +1858,14 @@ function Pencil:setPenColor(color, color_name)
     self.tool_settings[TOOL_PEN].color = color
     self.tool_settings[TOOL_PEN].color_name = color_name
     logger.info("Pencil: setPenColor - color_name =", color_name)
+    self:saveSettings()
+end
+
+-- Set pen width. Only callable while experimental_pen_width is on
+-- (the picker is the only UI path that invokes this).
+function Pencil:setPenWidth(width)
+    self.tool_settings[TOOL_PEN].width = width
+    logger.info("Pencil: setPenWidth - width =", width)
     self:saveSettings()
 end
 
