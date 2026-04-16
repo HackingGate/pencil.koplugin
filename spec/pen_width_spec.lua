@@ -74,25 +74,38 @@ local function createMockPencil(opts)
         self:saveSettings()
     end
 
-    -- Mirrors the item-list construction inside ColorPickerWidget:init()
-    function mock:buildPickerItems()
-        local items = {}
+    -- Mirrors ColorPickerWidget:init()'s per-row item construction. Colors
+    -- and widths live in separate rows; returning them as two lists lets
+    -- tests assert on both the layout and the gate without poking at widget
+    -- internals.
+    function mock:buildPickerRows()
+        local color_items = {}
         for _, c in ipairs(self.available_colors) do
-            table.insert(items, {
+            table.insert(color_items, {
                 kind = "color",
                 name = c.name,
                 color_value = c.color,
             })
         end
+        local width_items = {}
         if self.experimental_pen_width then
             for _, w in ipairs(self.available_widths) do
-                table.insert(items, {
+                table.insert(width_items, {
                     kind = "width",
                     name = w.name,
                     width_value = w.width,
                 })
             end
         end
+        return color_items, width_items
+    end
+
+    -- Back-compat for any test that just wants the flat list of visible items.
+    function mock:buildPickerItems()
+        local colors, widths = self:buildPickerRows()
+        local items = {}
+        for _, c in ipairs(colors) do table.insert(items, c) end
+        for _, w in ipairs(widths) do table.insert(items, w) end
         return items
     end
 
@@ -233,6 +246,34 @@ describe("picker item list (gate-aware)", function()
         end
 
         assert.same({ 3, 5, 7, 9 }, width_items)
+    end)
+
+end)
+
+
+describe("picker row layout", function()
+
+    it("puts widths in a separate row from colors when flag is on", function()
+        local pencil = createMockPencil({ experimental_pen_width = true })
+        local color_row, width_row = pencil:buildPickerRows()
+
+        -- Colors and widths are returned as distinct lists. If anyone ever
+        -- folds them back into a single row, this test fails loudly.
+        assert.equals(#pencil.available_colors, #color_row)
+        assert.equals(#pencil.available_widths, #width_row)
+        for _, item in ipairs(color_row) do
+            assert.equals("color", item.kind)
+        end
+        for _, item in ipairs(width_row) do
+            assert.equals("width", item.kind)
+        end
+    end)
+
+    it("leaves the width row empty when flag is off", function()
+        local pencil = createMockPencil({ experimental_pen_width = false })
+        local color_row, width_row = pencil:buildPickerRows()
+        assert.equals(#pencil.available_colors, #color_row)
+        assert.equals(0, #width_row)
     end)
 
 end)

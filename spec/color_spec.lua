@@ -120,19 +120,28 @@ local function createMockPencil(options)
         { name = "w9", width = 9 },
     }
 
-    -- Mirrors ColorPickerWidget:init's item-list construction so tests can
-    -- assert what the picker actually receives without reaching into the
-    -- widget's rendering internals.
-    function mock:buildPickerItems()
-        local items = {}
+    -- Mirrors ColorPickerWidget:init()'s per-row construction. Colors and
+    -- widths live on separate rows; buildPickerItems is a flattened view
+    -- kept for existing assertions.
+    function mock:buildPickerRows()
+        local colors = {}
         for _, c in ipairs(self.available_colors) do
-            table.insert(items, { kind = "color", name = c.name, color_value = c.color })
+            table.insert(colors, { kind = "color", name = c.name, color_value = c.color })
         end
+        local widths = {}
         if self.experimental_pen_width then
             for _, w in ipairs(self.available_widths) do
-                table.insert(items, { kind = "width", name = w.name, width_value = w.width })
+                table.insert(widths, { kind = "width", name = w.name, width_value = w.width })
             end
         end
+        return colors, widths
+    end
+
+    function mock:buildPickerItems()
+        local colors, widths = self:buildPickerRows()
+        local items = {}
+        for _, c in ipairs(colors) do table.insert(items, c) end
+        for _, w in ipairs(widths) do table.insert(items, w) end
         return items
     end
 

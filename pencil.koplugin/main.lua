@@ -15,6 +15,8 @@ local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
+local VerticalGroup = require("ui/widget/verticalgroup")
+local VerticalSpan = require("ui/widget/verticalspan")
 local PencilGeometry = require("lib/geometry")
 local Screen = Device.screen
 local Size = require("ui/size")
@@ -1078,17 +1080,32 @@ function Pencil:togglePenEraser()
     })
 end
 
+-- Safe tostring for key events. Some key-event objects hitting our handlers
+-- on KOReader 2026.03 have a __tostring metamethod that throws
+-- ("bad argument #1 to 'tostring' (table expected, got nil)") when an expected
+-- internal field is absent. A raw tostring(key) at the top of onKeyPress /
+-- onKeyRelease takes the whole handler down before it can set / clear eraser
+-- state, causing the pen-input freeze. pcall-ing avoids the abort; field-based
+-- checks like `key.key == "Eraser"` still work on the table directly.
+local function safe_key_tostring(key)
+    if key == nil then return "" end
+    local ok, s = pcall(tostring, key)
+    if ok and type(s) == "string" then return s end
+    return ""
+end
+
 -- Handle stylus button and tool events
 function Pencil:onKeyPress(key)
-    local key_str = tostring(key)
+    local key_str = safe_key_tostring(key)
 
     -- Always log key events when debug mode is on (even if not enabled)
     if self.input_debug_mode then
-        self:writeDebugLog(string.format("KEY PRESS: %s key.key=%s", key_str, tostring(key.key)))
+        local key_key = (type(key) == "table") and key.key or nil
+        self:writeDebugLog(string.format("KEY PRESS: %s key.key=%s", key_str, tostring(key_key)))
     end
 
     -- Hardware Eraser button - works regardless of pencil enabled state
-    if key.key == "Eraser" then
+    if type(key) == "table" and key.key == "Eraser" then
         logger.info("Pencil: Eraser button PRESSED")
         self.eraser_button_active = true
         self.eraser_button_deleted = {}
@@ -1130,15 +1147,16 @@ function Pencil:onKeyPress(key)
 end
 
 function Pencil:onKeyRelease(key)
-    local key_str = tostring(key)
+    local key_str = safe_key_tostring(key)
 
     -- Always log key events when debug mode is on (even if not enabled)
     if self.input_debug_mode then
-        self:writeDebugLog(string.format("KEY RELEASE: %s key.key=%s", key_str, tostring(key.key)))
+        local key_key = (type(key) == "table") and key.key or nil
+        self:writeDebugLog(string.format("KEY RELEASE: %s key.key=%s", key_str, tostring(key_key)))
     end
 
     -- Hardware Eraser button released
-    if key.key == "Eraser" and self.eraser_button_active then
+    if type(key) == "table" and key.key == "Eraser" and self.eraser_button_active then
         logger.info("Pencil: Eraser button RELEASED")
         self.eraser_button_active = false
         if self.eraser_button_deleted and #self.eraser_button_deleted > 0 then
@@ -1439,7 +1457,10 @@ function Pencil:cancelColorPickerTimer()
 end
 
 -- Color picker widget for selecting pen color (and optionally pen width).
--- Width items are appended after colors in the same row when `widths` is set.
+-- When `widths` is provided, the widget shows two rows: colors on top,
+-- widths below. The width row contains black bars whose vertical thickness
+-- matches the actual stroke thickness in device pixels (what-you-see is
+-- what-you-draw).
 local ColorPickerWidget = InputContainer:extend {
     width = nil,
     height = nil,
@@ -1449,159 +1470,202 @@ local ColorPickerWidget = InputContainer:extend {
     current_width = nil, -- Currently selected pen width (for width selection indicator)
     callback = nil,
     close_callback = nil,
+    -- Layout constants cached after init so handlePenTap / paintTo don't
+    -- recompute them. Kept on self so tests can read them too.
+    _button_size = nil,
+    _spacing = nil,
+    _row_gap = nil,
+    _padding = nil,
 }
+
+-- Build one button (color or width). Returns the InputContainer button, which
+-- also stores its own color / width metadata so the callback can route without
+-- string-matching on name.
+function ColorPickerWidget:_makeButton(item, button_size, selection_border)
+    -- Selection: colors compare by name, widths compare by width value
+    local is_selected
+    if item.kind == "width" then
+        is_selected = (item.width_value == self.current_width)
+    else
+        is_selected = (item.name == self.current_color_name)
+    end
+    local border_size = is_selected and selection_border or Size.border.thick
+
+    local swatch
+    if item.kind == "width" then
+        -- Truthful preview: a horizontal black bar whose height equals the
+        -- stroke's actual device-pixel thickness. We deliberately do NOT
+        -- scale by Screen:scaleBySize — the stroke itself is drawn in raw
+        -- pixels (see paintRectRGB32 in drawLineSegment), so scaling here
+        -- would lie about the line weight.
+        local inner = button_size - border_size * 2
+        local bar_h = item.width_value
+        local bar_w = math.floor(inner * 0.7)
+        local bar = FrameContainer:new{
+            width = bar_w,
+            height = bar_h,
+            padding = 0,
+            margin = 0,
+            bordersize = 0,
+            background = Blitbuffer.COLOR_BLACK,
+            WidgetContainer:new{
+                dimen = Geom:new{ w = bar_w, h = bar_h },
+            },
+        }
+        swatch = FrameContainer:new{
+            width = button_size,
+            height = button_size,
+            padding = 0,
+            margin = 0,
+            bordersize = border_size,
+            color = Blitbuffer.COLOR_BLACK,
+            background = Blitbuffer.COLOR_WHITE,
+            CenterContainer:new{
+                dimen = Geom:new{ w = inner, h = inner },
+                bar,
+            },
+        }
+    else
+        -- Regular color swatch
+        local border_color = Blitbuffer.COLOR_BLACK
+        if item.name == "Black" then
+            border_color = Blitbuffer.Color8(0x44)
+        end
+        swatch = FrameContainer:new{
+            width = button_size,
+            height = button_size,
+            padding = 0,
+            margin = 0,
+            bordersize = border_size,
+            color = border_color,
+            background = item.color_value,
+            WidgetContainer:new{
+                dimen = Geom:new{ w = button_size - border_size * 2, h = button_size - border_size * 2 },
+            },
+        }
+        if Screen.night_mode and item.name ~= "Black" and item.name ~= "Gray" then
+            swatch.background = swatch.background:invert()
+        end
+    end
+
+    local button = InputContainer:new{
+        dimen = Geom:new{ w = button_size, h = button_size },
+        swatch,
+        kind = item.kind,
+        color_value = item.color_value,  -- nil for width items
+        color_name = item.name,
+        width_value = item.width_value,  -- nil for color items
+    }
+
+    button.ges_events = {
+        TapSelectColor = {
+            GestureRange:new{
+                ges = "tap",
+                range = function() return button.dimen end,
+            },
+        },
+    }
+
+    local widget = self
+    button.onTapSelectColor = function(btn)
+        if widget.callback then
+            widget.callback(btn.color_value, btn.color_name, btn.width_value)
+        end
+        if widget.close_callback then
+            widget.close_callback()
+        end
+        return true
+    end
+
+    return button
+end
+
+-- Build a HorizontalGroup row of buttons from an item list. Populates the
+-- supplied `info_list` in-tap-index order.
+function ColorPickerWidget:_buildRow(items, button_size, spacing, selection_border, info_list)
+    local group = HorizontalGroup:new{ align = "center" }
+    for i, item in ipairs(items) do
+        if i > 1 then
+            table.insert(group, HorizontalSpan:new{ width = spacing })
+        end
+        local button = self:_makeButton(item, button_size, selection_border)
+        table.insert(group, button)
+        table.insert(info_list, button)
+    end
+    return group
+end
 
 function ColorPickerWidget:init()
     local button_size = Screen:scaleBySize(36)
     local spacing = Screen:scaleBySize(8)
+    local row_gap = Screen:scaleBySize(8)  -- vertical gap between color row and width row
     local padding = Screen:scaleBySize(10)
-    local selection_border = Size.border.thick * 3  -- Thicker border for selected color
+    local selection_border = Size.border.thick * 3
 
-    -- Build the combined item list: colors first, then (optionally) widths.
-    -- This is the single source of truth used by both rendering and tap routing
-    -- so the two cannot drift out of sync.
-    local items = {}
+    self._button_size = button_size
+    self._spacing = spacing
+    self._row_gap = row_gap
+    self._padding = padding
+
+    -- Build color row
+    local color_items = {}
     for _, color_info in ipairs(self.colors) do
-        table.insert(items, {
+        table.insert(color_items, {
             kind = "color",
             name = color_info.name,
             color_value = color_info.color,
         })
     end
-    if self.widths then
+    self.color_buttons_info = {}
+    local color_row_group = self:_buildRow(color_items, button_size, spacing, selection_border, self.color_buttons_info)
+    local colors_row_width = #color_items * button_size + (#color_items - 1) * spacing
+
+    -- Build optional width row
+    local has_widths = self.widths and #self.widths > 0
+    self.width_buttons_info = {}
+    local width_row_group
+    local widths_row_width = 0
+    if has_widths then
+        local width_items = {}
         for _, width_info in ipairs(self.widths) do
-            table.insert(items, {
+            table.insert(width_items, {
                 kind = "width",
                 name = width_info.name,
                 width_value = width_info.width,
             })
         end
+        width_row_group = self:_buildRow(width_items, button_size, spacing, selection_border, self.width_buttons_info)
+        widths_row_width = #width_items * button_size + (#width_items - 1) * spacing
     end
 
-    -- Calculate picker width from the combined item count
-    local num_buttons = #items
-    local buttons_width = num_buttons * button_size + (num_buttons - 1) * spacing
-    self.width = buttons_width
-    self.height = button_size  -- FrameContainer adds equal padding all sides
+    -- Inner width accommodates the wider of the two rows (colors are always wider
+    -- in practice, but taking max keeps the geometry correct if that ever changes).
+    local inner_w = math.max(colors_row_width, widths_row_width)
+    self.width = inner_w
+    self.height = button_size + (has_widths and (row_gap + button_size) or 0)
 
-    -- Store button info for later position update
-    self.color_buttons_info = {}
-
-    -- Create buttons row (colors + optional widths)
-    local color_buttons = HorizontalGroup:new{ align = "center" }
-
-    for i, item in ipairs(items) do
-        if i > 1 then
-            table.insert(color_buttons, HorizontalSpan:new{ width = spacing })
-        end
-
-        -- Selection: colors compare by name, widths compare by width value
-        local is_selected
-        if item.kind == "width" then
-            is_selected = (item.width_value == self.current_width)
-        else
-            is_selected = (item.name == self.current_color_name)
-        end
-        local border_size = is_selected and selection_border or Size.border.thick
-
-        local swatch
-        if item.kind == "width" then
-            -- Width preview: white background with a centered black dot sized
-            -- to the actual stroke width. Caps at ~60% of button interior so
-            -- even the largest width leaves a visible white ring.
-            local inner = button_size - border_size * 2
-            local dot_size = math.min(inner - 4, item.width_value * Screen:scaleBySize(3))
-            if dot_size < Screen:scaleBySize(3) then
-                dot_size = Screen:scaleBySize(3)
-            end
-            local dot = FrameContainer:new{
-                width = dot_size,
-                height = dot_size,
-                padding = 0,
-                margin = 0,
-                bordersize = 0,
-                background = Blitbuffer.COLOR_BLACK,
-                WidgetContainer:new{
-                    dimen = Geom:new{ w = dot_size, h = dot_size },
-                },
-            }
-            swatch = FrameContainer:new{
-                width = button_size,
-                height = button_size,
-                padding = 0,
-                margin = 0,
-                bordersize = border_size,
-                color = Blitbuffer.COLOR_BLACK,
-                background = Blitbuffer.COLOR_WHITE,
-                CenterContainer:new{
-                    dimen = Geom:new{ w = inner, h = inner },
-                    dot,
-                },
-            }
-        else
-            -- Regular color swatch
-            local border_color = Blitbuffer.COLOR_BLACK
-            if item.name == "Black" then
-                border_color = Blitbuffer.Color8(0x44)
-            end
-            swatch = FrameContainer:new{
-                width = button_size,
-                height = button_size,
-                padding = 0,
-                margin = 0,
-                bordersize = border_size,
-                color = border_color,
-                background = item.color_value,
-                WidgetContainer:new{
-                    dimen = Geom:new{ w = button_size - border_size * 2, h = button_size - border_size * 2 },
-                },
-            }
-            if Screen.night_mode and item.name ~= "Black" and item.name ~= "Gray" then
-                swatch.background = swatch.background:invert()
-            end
-        end
-
-        -- Wrap in InputContainer to handle taps. The button keeps its full
-        -- item metadata so the callback can distinguish color vs width
-        -- without string-matching the name.
-        local button = InputContainer:new{
-            dimen = Geom:new{ w = button_size, h = button_size },
-            swatch,
-            kind = item.kind,
-            color_value = item.color_value,  -- nil for width items
-            color_name = item.name,
-            width_value = item.width_value,  -- nil for color items
-        }
-
-        button.ges_events = {
-            TapSelectColor = {
-                GestureRange:new{
-                    ges = "tap",
-                    range = function() return button.dimen end,
-                },
-            },
-        }
-
-        local widget = self
-        button.onTapSelectColor = function(btn)
-            if widget.callback then
-                widget.callback(btn.color_value, btn.color_name, btn.width_value)
-            end
-            if widget.close_callback then
-                widget.close_callback()
-            end
-            return true
-        end
-
-        table.insert(color_buttons, button)
-        table.insert(self.color_buttons_info, button)
-    end
-
-    -- Create the frame - FrameContainer adds equal padding on all sides
-    local content = CenterContainer:new{
-        dimen = Geom:new{ w = self.width, h = button_size },
-        color_buttons,
+    -- Both rows centered within inner_w so the (narrower) width row sits under
+    -- the colors, not flush-left.
+    local colors_row = CenterContainer:new{
+        dimen = Geom:new{ w = inner_w, h = button_size },
+        color_row_group,
     }
+
+    local content
+    if has_widths then
+        local widths_row = CenterContainer:new{
+            dimen = Geom:new{ w = inner_w, h = button_size },
+            width_row_group,
+        }
+        content = VerticalGroup:new{
+            align = "center",
+            colors_row,
+            VerticalSpan:new{ width = row_gap },
+            widths_row,
+        }
+    else
+        content = colors_row
+    end
 
     self.frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
@@ -1628,8 +1692,29 @@ function ColorPickerWidget:init()
     }
 end
 
+-- Hit-test one row of buttons. `row_y` is the top y of the row in absolute
+-- coordinates. Returns the matching button info or nil.
+function ColorPickerWidget:_hitRow(x, y, row_y, info_list)
+    local button_size = self._button_size
+    local spacing = self._spacing
+    if #info_list == 0 then return nil end
+    if y < row_y or y >= row_y + button_size then return nil end
+
+    local row_buttons_width = #info_list * button_size + (#info_list - 1) * spacing
+    local row_start_x = self.dimen.x + (self.dimen.w - row_buttons_width) / 2
+    local relative_x = x - row_start_x
+    if relative_x < 0 or relative_x >= row_buttons_width then return nil end
+
+    local stride = button_size + spacing
+    local idx = math.floor(relative_x / stride) + 1
+    local pos_in_slot = relative_x - (idx - 1) * stride
+    if pos_in_slot >= button_size then return nil end
+    if idx < 1 or idx > #info_list then return nil end
+    return info_list[idx]
+end
+
 -- Handle pen/stylus tap on color picker
--- Returns true if the tap was handled (hit a color button or was inside picker)
+-- Returns true if the tap was handled (hit a button or was inside picker)
 function ColorPickerWidget:handlePenTap(x, y)
     if not self.dimen then
         return false
@@ -1647,45 +1732,25 @@ function ColorPickerWidget:handlePenTap(x, y)
         return true  -- Consume the event to prevent drawing
     end
 
-    -- Calculate button positions directly from scratch
-    local button_size = Screen:scaleBySize(36)
-    local spacing = Screen:scaleBySize(8)
-    local padding = Screen:scaleBySize(10)
     local border = Size.border.window
+    local button_size = self._button_size
+    local row_gap = self._row_gap
+    local padding = self._padding
 
-    local num_buttons = #self.color_buttons_info
-    local total_buttons_width = num_buttons * button_size + (num_buttons - 1) * spacing
+    local colors_row_y = self.dimen.y + border + padding
+    local widths_row_y = colors_row_y + button_size + row_gap
 
-    -- The buttons are centered within the widget
-    -- Frame adds border + padding on each side
-    -- Then CenterContainer centers the buttons
-    -- buttons_start_x = widget_x + (widget_width - total_buttons_width) / 2
-    local buttons_start_x = self.dimen.x + (self.dimen.w - total_buttons_width) / 2
+    local btn = self:_hitRow(x, y, colors_row_y, self.color_buttons_info)
+        or self:_hitRow(x, y, widths_row_y, self.width_buttons_info)
 
-    -- Vertical position: border + padding (frame only, no VerticalSpans)
-    local buttons_y = self.dimen.y + border + padding
-
-    -- Check if tap is in the button row vertically
-    if y >= buttons_y and y < buttons_y + button_size then
-        -- Find which button was tapped based on x position
-        local relative_x = x - buttons_start_x
-        if relative_x >= 0 and relative_x < total_buttons_width then
-            -- Calculate which button index this falls into
-            local button_with_spacing = button_size + spacing
-            local button_index = math.floor(relative_x / button_with_spacing) + 1
-            -- Check if we're actually on the button and not in the spacing
-            local pos_in_slot = relative_x - (button_index - 1) * button_with_spacing
-            if pos_in_slot < button_size and button_index >= 1 and button_index <= num_buttons then
-                local btn = self.color_buttons_info[button_index]
-                if btn and self.callback then
-                    self.callback(btn.color_value, btn.color_name, btn.width_value)
-                end
-                if self.close_callback then
-                    self.close_callback()
-                end
-                return true
-            end
+    if btn then
+        if self.callback then
+            self.callback(btn.color_value, btn.color_name, btn.width_value)
         end
+        if self.close_callback then
+            self.close_callback()
+        end
+        return true
     end
 
     -- Inside picker but didn't hit a button - still consume the event
@@ -1711,6 +1776,20 @@ function ColorPickerWidget:onTapCloseOutside(_, ges)
     return true
 end
 
+-- Update button dimens for one row so individual TapSelectColor gesture ranges
+-- match the painted positions. Mirrors the centered layout built in init().
+function ColorPickerWidget:_placeRow(info_list, paint_x, frame_inner_width, padding, border, row_y)
+    if #info_list == 0 then return end
+    local button_size = self._button_size
+    local spacing = self._spacing
+    local total_buttons_width = #info_list * button_size + (#info_list - 1) * spacing
+    local row_start_x = paint_x + border + padding + (frame_inner_width - total_buttons_width) / 2
+    for i, btn in ipairs(info_list) do
+        btn.dimen.x = row_start_x + (i - 1) * (button_size + spacing)
+        btn.dimen.y = row_y
+    end
+end
+
 function ColorPickerWidget:paintTo(bb, x, y)
     -- Use absolute position from dimen if set, otherwise use passed coordinates
     local paint_x = self.dimen and self.dimen.x or x
@@ -1719,24 +1798,20 @@ function ColorPickerWidget:paintTo(bb, x, y)
     -- Paint the frame at the absolute position
     self.frame:paintTo(bb, paint_x, paint_y)
 
-    -- Update button dimens for tap detection at absolute positions
-    if self.color_buttons_info then
-        local button_size = Screen:scaleBySize(36)
-        local spacing = Screen:scaleBySize(8)
-        local padding = Screen:scaleBySize(10)
-        local border = Size.border.window
+    if not self.color_buttons_info then return end
 
-        -- Calculate button positions within the frame
-        local total_buttons_width = #self.color_buttons_info * button_size + (#self.color_buttons_info - 1) * spacing
-        local frame_inner_width = self.dimen.w - 2 * padding - 2 * border
-        local buttons_start_x = paint_x + border + padding + (frame_inner_width - total_buttons_width) / 2
-        local buttons_y = paint_y + border + padding  -- just FrameContainer padding
+    local button_size = self._button_size
+    local row_gap = self._row_gap
+    local padding = self._padding
+    local border = Size.border.window
+    local frame_inner_width = self.dimen.w - 2 * padding - 2 * border
 
-        for i, btn in ipairs(self.color_buttons_info) do
-            local btn_x = buttons_start_x + (i - 1) * (button_size + spacing)
-            btn.dimen.x = btn_x
-            btn.dimen.y = buttons_y
-        end
+    local colors_row_y = paint_y + border + padding
+    self:_placeRow(self.color_buttons_info, paint_x, frame_inner_width, padding, border, colors_row_y)
+
+    if self.width_buttons_info and #self.width_buttons_info > 0 then
+        local widths_row_y = colors_row_y + button_size + row_gap
+        self:_placeRow(self.width_buttons_info, paint_x, frame_inner_width, padding, border, widths_row_y)
     end
 end
 
@@ -1766,16 +1841,21 @@ function Pencil:showColorPicker(x, y)
     local show_widths = self.experimental_pen_width
     local widths_for_picker = show_widths and self.available_widths or nil
 
-    -- Calculate picker size based on total button count (colors + optional widths)
+    -- Picker now uses two rows (colors on top, widths below) when widths are
+    -- shown. Keep the width computation tracking the colors row (which is
+    -- the wider of the two) and add a second button_size + row_gap to height.
     local button_size = Screen:scaleBySize(36)
     local spacing = Screen:scaleBySize(8)
+    local row_gap = Screen:scaleBySize(8)
     local padding = Screen:scaleBySize(10)
     local border = Size.border.window
-    local num_buttons = #self.available_colors + (show_widths and #self.available_widths or 0)
-    -- Width/height = buttons + FrameContainer padding (equal on all sides) + borders
-    local buttons_width = num_buttons * button_size + (num_buttons - 1) * spacing
+    local num_colors = #self.available_colors
+    local buttons_width = num_colors * button_size + (num_colors - 1) * spacing
     local picker_width = buttons_width + padding * 2 + border * 2
     local picker_height = button_size + padding * 2 + border * 2
+    if show_widths then
+        picker_height = picker_height + row_gap + button_size
+    end
     local margin_above = Screen:scaleBySize(30)  -- Gap between picker and pen
     local screen_margin = 10  -- Minimum margin from screen edges
 
