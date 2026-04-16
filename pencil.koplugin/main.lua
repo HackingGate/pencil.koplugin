@@ -482,11 +482,12 @@ function Pencil:handleStylusSlot(input, slot)
             self.pen_x = x
             self.pen_y = y
             -- Only track picker state and schedule the 10Hz poll when the
-            -- hold-pen-still gesture is actually enabled. Skipping these
-            -- when gated off avoids an UIManager:scheduleIn closure
-            -- allocation on every pen-down — real GC pressure on the A53
-            -- during multi-second strokes.
-            if self.experimental_color_picker then
+            -- hold-pen-still gesture would actually produce something to
+            -- show. Skipping these when both experimental pickers are off
+            -- avoids an UIManager:scheduleIn closure allocation on every
+            -- pen-down — real GC pressure on the A53 during multi-second
+            -- strokes.
+            if self.experimental_color_picker or self.experimental_pen_width then
                 self.color_picker_start_x = x
                 self.color_picker_start_y = y
                 self.color_picker_start_time = time.now()
@@ -1431,9 +1432,10 @@ end
 
 -- Check if color picker should be shown (called periodically while pen is down)
 function Pencil:checkColorPickerTrigger()
-    -- Gated behind the experimental flag. When off, the hold-pen-still gesture
-    -- does nothing and the pen stays on its last-saved color.
-    if not self.experimental_color_picker then return end
+    -- Gated behind the two experimental flags. At least one must be on for
+    -- the hold-pen-still gesture to produce anything; otherwise the pen
+    -- stays on its last-saved color/width.
+    if not (self.experimental_color_picker or self.experimental_pen_width) then return end
     if not self.color_picker_start_time then return end
     if self.color_picker_showing then return end
 
@@ -1625,18 +1627,24 @@ function ColorPickerWidget:init()
     self._row_gap = row_gap
     self._padding = padding
 
-    -- Build color row
-    local color_items = {}
-    for _, color_info in ipairs(self.colors) do
-        table.insert(color_items, {
-            kind = "color",
-            name = color_info.name,
-            color_value = color_info.color,
-        })
-    end
+    -- Build optional color row. `colors` is nil when the color-picker
+    -- experimental flag is off; in that case we render a widths-only picker.
+    local has_colors = self.colors and #self.colors > 0
     self.color_buttons_info = {}
-    local color_row_group = self:_buildRow(color_items, button_size, spacing, selection_border, self.color_buttons_info)
-    local colors_row_width = #color_items * button_size + (#color_items - 1) * spacing
+    local color_row_group
+    local colors_row_width = 0
+    if has_colors then
+        local color_items = {}
+        for _, color_info in ipairs(self.colors) do
+            table.insert(color_items, {
+                kind = "color",
+                name = color_info.name,
+                color_value = color_info.color,
+            })
+        end
+        color_row_group = self:_buildRow(color_items, button_size, spacing, selection_border, self.color_buttons_info)
+        colors_row_width = #color_items * button_size + (#color_items - 1) * spacing
+    end
 
     -- Build optional width row
     local has_widths = self.widths and #self.widths > 0
@@ -1656,33 +1664,39 @@ function ColorPickerWidget:init()
         widths_row_width = #width_items * button_size + (#width_items - 1) * spacing
     end
 
-    -- Inner width accommodates the wider of the two rows (colors are always wider
-    -- in practice, but taking max keeps the geometry correct if that ever changes).
+    -- Inner width accommodates the wider of the visible rows. Height
+    -- accumulates one button_size per visible row plus a gap when both
+    -- are showing.
+    local visible_rows = (has_colors and 1 or 0) + (has_widths and 1 or 0)
     local inner_w = math.max(colors_row_width, widths_row_width)
     self.width = inner_w
-    self.height = button_size + (has_widths and (row_gap + button_size) or 0)
-
-    -- Both rows centered within inner_w so the (narrower) width row sits under
-    -- the colors, not flush-left.
-    local colors_row = CenterContainer:new{
-        dimen = Geom:new{ w = inner_w, h = button_size },
-        color_row_group,
-    }
+    self.height = visible_rows * button_size + (visible_rows > 1 and row_gap or 0)
 
     local content
-    if has_widths then
-        local widths_row = CenterContainer:new{
+    if has_colors and has_widths then
+        content = VerticalGroup:new{
+            align = "center",
+            CenterContainer:new{
+                dimen = Geom:new{ w = inner_w, h = button_size },
+                color_row_group,
+            },
+            VerticalSpan:new{ width = row_gap },
+            CenterContainer:new{
+                dimen = Geom:new{ w = inner_w, h = button_size },
+                width_row_group,
+            },
+        }
+    elseif has_colors then
+        content = CenterContainer:new{
+            dimen = Geom:new{ w = inner_w, h = button_size },
+            color_row_group,
+        }
+    else
+        -- widths-only picker (color picker experimental flag off)
+        content = CenterContainer:new{
             dimen = Geom:new{ w = inner_w, h = button_size },
             width_row_group,
         }
-        content = VerticalGroup:new{
-            align = "center",
-            colors_row,
-            VerticalSpan:new{ width = row_gap },
-            widths_row,
-        }
-    else
-        content = colors_row
     end
 
     self.frame = FrameContainer:new{
@@ -1755,10 +1769,14 @@ function ColorPickerWidget:handlePenTap(x, y)
     local row_gap = self._row_gap
     local padding = self._padding
 
-    local colors_row_y = self.dimen.y + border + padding
-    local widths_row_y = colors_row_y + button_size + row_gap
+    -- When colors are hidden (color-picker flag off, width-picker on),
+    -- the widths row slides up to the top-row position. The info-lists
+    -- drive which row is where.
+    local top_row_y = self.dimen.y + border + padding
+    local colors_present = #self.color_buttons_info > 0
+    local widths_row_y = colors_present and (top_row_y + button_size + row_gap) or top_row_y
 
-    local btn = self:_hitRow(x, y, colors_row_y, self.color_buttons_info)
+    local btn = self:_hitRow(x, y, top_row_y, self.color_buttons_info)
         or self:_hitRow(x, y, widths_row_y, self.width_buttons_info)
 
     if btn then
@@ -1824,11 +1842,17 @@ function ColorPickerWidget:paintTo(bb, x, y)
     local border = Size.border.window
     local frame_inner_width = self.dimen.w - 2 * padding - 2 * border
 
-    local colors_row_y = paint_y + border + padding
-    self:_placeRow(self.color_buttons_info, paint_x, frame_inner_width, padding, border, colors_row_y)
+    -- Symmetric with handlePenTap: widths slide up to the top slot when
+    -- no colors are visible.
+    local top_row_y = paint_y + border + padding
+    local colors_present = #self.color_buttons_info > 0
+
+    if colors_present then
+        self:_placeRow(self.color_buttons_info, paint_x, frame_inner_width, padding, border, top_row_y)
+    end
 
     if self.width_buttons_info and #self.width_buttons_info > 0 then
-        local widths_row_y = colors_row_y + button_size + row_gap
+        local widths_row_y = colors_present and (top_row_y + button_size + row_gap) or top_row_y
         self:_placeRow(self.width_buttons_info, paint_x, frame_inner_width, padding, border, widths_row_y)
     end
 end
@@ -1855,24 +1879,33 @@ function Pencil:showColorPicker(x, y)
 
     local plugin = self
 
-    -- Include the width row only when the experimental toggle is on
+    -- Which rows to render is driven by the two experimental toggles,
+    -- independently. The hold-pen-still gesture only gets here when at
+    -- least one of them is on (see checkColorPickerTrigger), so at least
+    -- one row is guaranteed non-empty.
+    local show_colors = self.experimental_color_picker
     local show_widths = self.experimental_pen_width
+    local colors_for_picker = show_colors and self.available_colors or nil
     local widths_for_picker = show_widths and self.available_widths or nil
 
-    -- Picker now uses two rows (colors on top, widths below) when widths are
-    -- shown. Keep the width computation tracking the colors row (which is
-    -- the wider of the two) and add a second button_size + row_gap to height.
+    -- Picker uses up to two rows (colors on top, widths below). Row width
+    -- is the wider of the two visible rows; height accumulates one
+    -- button_size per visible row plus a gap between them.
     local button_size = Screen:scaleBySize(36)
     local spacing = Screen:scaleBySize(8)
     local row_gap = Screen:scaleBySize(8)
     local padding = Screen:scaleBySize(10)
     local border = Size.border.window
-    local num_colors = #self.available_colors
-    local buttons_width = num_colors * button_size + (num_colors - 1) * spacing
+    local colors_row_width = show_colors and
+        (#self.available_colors * button_size + (#self.available_colors - 1) * spacing) or 0
+    local widths_row_width = show_widths and
+        (#self.available_widths * button_size + (#self.available_widths - 1) * spacing) or 0
+    local buttons_width = math.max(colors_row_width, widths_row_width)
     local picker_width = buttons_width + padding * 2 + border * 2
-    local picker_height = button_size + padding * 2 + border * 2
-    if show_widths then
-        picker_height = picker_height + row_gap + button_size
+    local rows = (show_colors and 1 or 0) + (show_widths and 1 or 0)
+    local picker_height = rows * button_size + padding * 2 + border * 2
+    if rows > 1 then
+        picker_height = picker_height + row_gap
     end
     local margin_above = Screen:scaleBySize(30)  -- Gap between picker and pen
     local screen_margin = 10  -- Minimum margin from screen edges
@@ -1900,7 +1933,7 @@ function Pencil:showColorPicker(x, y)
     end
 
     local color_picker = ColorPickerWidget:new{
-        colors = self.available_colors,
+        colors = colors_for_picker,
         widths = widths_for_picker,
         current_color_name = self.tool_settings[TOOL_PEN].color_name,
         current_width = self.tool_settings[TOOL_PEN].width,

@@ -83,9 +83,10 @@ local function createMockPencil(opts)
     end
 
     -- Mirrors checkColorPickerTrigger's gate: the hold-pen-still gesture
-    -- only opens the picker when experimental_color_picker is on.
+    -- opens the picker if either experimental flag is on, so the width
+    -- picker is reachable without needing the color picker enabled.
     function mock:checkColorPickerTrigger()
-        if not self.experimental_color_picker then return false end
+        if not (self.experimental_color_picker or self.experimental_pen_width) then return false end
         if not self.color_picker_start_time then return false end
         if self.color_picker_showing then return false end
         self._picker_shown = true
@@ -383,12 +384,24 @@ describe("experimental_color_picker gate", function()
         assert.is_true(fresh.experimental_color_picker)
     end)
 
-    it("is independent of experimental_pen_width", function()
-        -- Width picker flag on but color picker off: gesture still suppressed
-        -- (the width picker rides inside the color picker, so without it
-        -- opening, width rows are unreachable).
+    it("width flag alone is enough to open the picker", function()
+        -- Width picker flag on, color picker flag off: the hold-pen-still
+        -- gesture still opens the picker so widths remain reachable.
+        -- In this state the picker shows widths only (no colors row).
         local pencil = createMockPencil({
             experimental_pen_width = true,
+            experimental_color_picker = false,
+        })
+        pencil.color_picker_start_time = 1000
+
+        local opened = pencil:checkColorPickerTrigger()
+
+        assert.is_true(opened)
+    end)
+
+    it("both flags off fully suppresses the trigger", function()
+        local pencil = createMockPencil({
+            experimental_pen_width = false,
             experimental_color_picker = false,
         })
         pencil.color_picker_start_time = 1000
