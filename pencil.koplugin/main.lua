@@ -1080,32 +1080,17 @@ function Pencil:togglePenEraser()
     })
 end
 
--- Safe tostring for key events. Some key-event objects hitting our handlers
--- on KOReader 2026.03 have a __tostring metamethod that throws
--- ("bad argument #1 to 'tostring' (table expected, got nil)") when an expected
--- internal field is absent. A raw tostring(key) at the top of onKeyPress /
--- onKeyRelease takes the whole handler down before it can set / clear eraser
--- state, causing the pen-input freeze. pcall-ing avoids the abort; field-based
--- checks like `key.key == "Eraser"` still work on the table directly.
-local function safe_key_tostring(key)
-    if key == nil then return "" end
-    local ok, s = pcall(tostring, key)
-    if ok and type(s) == "string" then return s end
-    return ""
-end
-
 -- Handle stylus button and tool events
 function Pencil:onKeyPress(key)
-    local key_str = safe_key_tostring(key)
+    local key_str = tostring(key)
 
     -- Always log key events when debug mode is on (even if not enabled)
     if self.input_debug_mode then
-        local key_key = (type(key) == "table") and key.key or nil
-        self:writeDebugLog(string.format("KEY PRESS: %s key.key=%s", key_str, tostring(key_key)))
+        self:writeDebugLog(string.format("KEY PRESS: %s key.key=%s", key_str, tostring(key.key)))
     end
 
     -- Hardware Eraser button - works regardless of pencil enabled state
-    if type(key) == "table" and key.key == "Eraser" then
+    if key.key == "Eraser" then
         logger.info("Pencil: Eraser button PRESSED")
         self.eraser_button_active = true
         self.eraser_button_deleted = {}
@@ -1147,16 +1132,15 @@ function Pencil:onKeyPress(key)
 end
 
 function Pencil:onKeyRelease(key)
-    local key_str = safe_key_tostring(key)
+    local key_str = tostring(key)
 
     -- Always log key events when debug mode is on (even if not enabled)
     if self.input_debug_mode then
-        local key_key = (type(key) == "table") and key.key or nil
-        self:writeDebugLog(string.format("KEY RELEASE: %s key.key=%s", key_str, tostring(key_key)))
+        self:writeDebugLog(string.format("KEY RELEASE: %s key.key=%s", key_str, tostring(key.key)))
     end
 
     -- Hardware Eraser button released
-    if type(key) == "table" and key.key == "Eraser" and self.eraser_button_active then
+    if key.key == "Eraser" and self.eraser_button_active then
         logger.info("Pencil: Eraser button RELEASED")
         self.eraser_button_active = false
         if self.eraser_button_deleted and #self.eraser_button_deleted > 0 then
