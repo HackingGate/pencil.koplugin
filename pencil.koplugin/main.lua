@@ -481,11 +481,18 @@ function Pencil:handleStylusSlot(input, slot)
             local x, y = self:transformCoordinates(raw_x, raw_y)
             self.pen_x = x
             self.pen_y = y
-            self.color_picker_start_x = x
-            self.color_picker_start_y = y
-            self.color_picker_start_time = time.now()
-            -- Schedule periodic check for color picker trigger
-            self:scheduleColorPickerCheck()
+            -- Only track picker state and schedule the 10Hz poll when the
+            -- hold-pen-still gesture is actually enabled. Skipping these
+            -- when gated off avoids an UIManager:scheduleIn closure
+            -- allocation on every pen-down — real GC pressure on the A53
+            -- during multi-second strokes.
+            if self.experimental_color_picker then
+                self.color_picker_start_x = x
+                self.color_picker_start_y = y
+                self.color_picker_start_time = time.now()
+                -- Schedule periodic check for color picker trigger
+                self:scheduleColorPickerCheck()
+            end
             if self.input_debug_mode then
                 self:writeDebugLog("=== PEN DOWN ===")
             end
@@ -729,6 +736,7 @@ function Pencil:loadSettings()
     -- Experimental features
     self.experimental_bookmark_sync = settings.experimental_bookmark_sync or false
     self.experimental_pen_width = settings.experimental_pen_width or false
+    self.experimental_color_picker = settings.experimental_color_picker or false
     -- Load pen color by name and look up the actual color value
     local color_name = settings.pen_color_name
     if color_name then
@@ -760,6 +768,7 @@ function Pencil:saveSettings()
         input_debug_mode = self.input_debug_mode,
         experimental_bookmark_sync = self.experimental_bookmark_sync,
         experimental_pen_width = self.experimental_pen_width,
+        experimental_color_picker = self.experimental_color_picker,
         pen_color_name = self.tool_settings[TOOL_PEN].color_name,
         pen_width = self.tool_settings[TOOL_PEN].width,
     })
@@ -898,8 +907,30 @@ function Pencil:addToMainMenu(menu_items)
                         end,
                     },
                     {
+                        text = _("Color picker"),
+                        help_text = _("Allow the hold-pen-still gesture to open a picker for changing pen color (and, if the pen width picker is also enabled, stroke width). When disabled, the pen stays on its last-saved color."),
+                        checked_func = function()
+                            return self.experimental_color_picker
+                        end,
+                        callback = function()
+                            self.experimental_color_picker = not self.experimental_color_picker
+                            self:saveSettings()
+                            if self.experimental_color_picker then
+                                UIManager:show(InfoMessage:new{
+                                    text = _("Color picker enabled. Hold the pen still to open it."),
+                                    timeout = 3,
+                                })
+                            else
+                                UIManager:show(InfoMessage:new{
+                                    text = _("Color picker disabled. Pen will keep its current color."),
+                                    timeout = 2,
+                                })
+                            end
+                        end,
+                    },
+                    {
                         text = _("Pen width picker"),
-                        help_text = _("Add pen width options (3, 5, 7, 9) to the color picker. The width buttons appear as black dots whose size previews the stroke thickness."),
+                        help_text = _("Add pen width options (3, 5, 7, 9) to the color picker. The width buttons appear as black bars whose height previews the stroke thickness. Requires the color picker to also be enabled."),
                         checked_func = function()
                             return self.experimental_pen_width
                         end,
@@ -1400,6 +1431,9 @@ end
 
 -- Check if color picker should be shown (called periodically while pen is down)
 function Pencil:checkColorPickerTrigger()
+    -- Gated behind the experimental flag. When off, the hold-pen-still gesture
+    -- does nothing and the pen stays on its last-saved color.
+    if not self.experimental_color_picker then return end
     if not self.color_picker_start_time then return end
     if self.color_picker_showing then return end
 

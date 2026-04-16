@@ -40,6 +40,12 @@ local function createMockPencil(opts)
             { name = "w9", width = 9 },
         },
         experimental_pen_width = opts.experimental_pen_width or false,
+        experimental_color_picker = opts.experimental_color_picker or false,
+
+        -- Hold-pen-still gesture state
+        color_picker_start_time = nil,
+        color_picker_showing = false,
+        _picker_shown = false,
 
         -- Mirror of G_reader_settings for this test
         _settings_store = opts.settings or {},
@@ -50,6 +56,7 @@ local function createMockPencil(opts)
         self._save_count = self._save_count + 1
         self._settings_store = {
             experimental_pen_width = self.experimental_pen_width,
+            experimental_color_picker = self.experimental_color_picker,
             pen_color_name = self.tool_settings[TOOL_PEN].color_name,
             pen_width = self.tool_settings[TOOL_PEN].width,
         }
@@ -58,6 +65,7 @@ local function createMockPencil(opts)
     function mock:loadSettings()
         local settings = self._settings_store or {}
         self.experimental_pen_width = settings.experimental_pen_width or false
+        self.experimental_color_picker = settings.experimental_color_picker or false
         local saved_width = settings.pen_width
         if saved_width then
             for _, w in ipairs(self.available_widths) do
@@ -72,6 +80,17 @@ local function createMockPencil(opts)
     function mock:setPenWidth(width)
         self.tool_settings[TOOL_PEN].width = width
         self:saveSettings()
+    end
+
+    -- Mirrors checkColorPickerTrigger's gate: the hold-pen-still gesture
+    -- only opens the picker when experimental_color_picker is on.
+    function mock:checkColorPickerTrigger()
+        if not self.experimental_color_picker then return false end
+        if not self.color_picker_start_time then return false end
+        if self.color_picker_showing then return false end
+        self._picker_shown = true
+        self.color_picker_showing = true
+        return true
     end
 
     -- Mirrors ColorPickerWidget:init()'s per-row item construction. Colors
@@ -322,6 +341,61 @@ describe("picker callback routing", function()
         assert.equals(fake_color, pencil.tool_settings[TOOL_PEN].color)
         -- Width unchanged
         assert.equals(3, pencil.tool_settings[TOOL_PEN].width)
+    end)
+
+end)
+
+
+describe("experimental_color_picker gate", function()
+
+    it("defaults to off", function()
+        local pencil = createMockPencil()
+        assert.is_false(pencil.experimental_color_picker)
+    end)
+
+    it("suppresses the hold-pen-still trigger when off", function()
+        local pencil = createMockPencil({ experimental_color_picker = false })
+        pencil.color_picker_start_time = 1000  -- would normally cause trigger
+
+        local opened = pencil:checkColorPickerTrigger()
+
+        assert.is_false(opened)
+        assert.is_false(pencil.color_picker_showing)
+    end)
+
+    it("allows the trigger when on", function()
+        local pencil = createMockPencil({ experimental_color_picker = true })
+        pencil.color_picker_start_time = 1000
+
+        local opened = pencil:checkColorPickerTrigger()
+
+        assert.is_true(opened)
+        assert.is_true(pencil.color_picker_showing)
+    end)
+
+    it("round-trips the flag through save/load", function()
+        local pencil = createMockPencil({ experimental_color_picker = true })
+        pencil:saveSettings()
+
+        local fresh = createMockPencil({ settings = pencil._settings_store })
+        fresh:loadSettings()
+
+        assert.is_true(fresh.experimental_color_picker)
+    end)
+
+    it("is independent of experimental_pen_width", function()
+        -- Width picker flag on but color picker off: gesture still suppressed
+        -- (the width picker rides inside the color picker, so without it
+        -- opening, width rows are unreachable).
+        local pencil = createMockPencil({
+            experimental_pen_width = true,
+            experimental_color_picker = false,
+        })
+        pencil.color_picker_start_time = 1000
+
+        local opened = pencil:checkColorPickerTrigger()
+
+        assert.is_false(opened)
     end)
 
 end)
