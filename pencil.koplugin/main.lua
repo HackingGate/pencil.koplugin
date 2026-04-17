@@ -817,10 +817,9 @@ function Pencil:finishTextHighlight()
     if has_selection then
         -- saveHighlight(false) builds the annotation item from self.selected_text
         -- and calls self.ui.annotation:addItem(item) internally, handling the
-        -- PDF/EPUB item-shape difference. It ALSO emits AnnotationsModified
-        -- itself — do not emit a second one here or downstream listeners fire
-        -- twice and we end up with a duplicate highlight on the page (one
-        -- from the word under the start pos, one from the full range).
+        -- PDF/EPUB item-shape difference. It emits AnnotationsModified itself,
+        -- so we do NOT emit a second one here — a userpatch may further wrap
+        -- this call to prompt for color, but that's not the plugin's concern.
         local ok, err = pcall(rh.saveHighlight, rh, false)
         if not ok then
             logger.warn("Pencil: saveHighlight failed:", tostring(err))
