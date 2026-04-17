@@ -28,6 +28,7 @@ local KEY_RELEASE = 0
 local TOOL_TYPE_FINGER = 0
 local TOOL_TYPE_PEN    = 1
 local TOOL_TYPE_ERASER = 2
+local TOOL_TYPE_HIGHLIGHTER = 3
 
 -- For debug logging of ev.type
 local linux_evdev_type_map = {
@@ -492,13 +493,18 @@ function Input:routeStylusEvents()
             -- but also sends BTN_STYLUS. Override to ERASER when that's active.
             -- Only do this for tool=PEN to avoid affecting fingers (tool=0)
             -- Based on eraser detection pattern from eraser.koplugin by SimonLiu
-            if self.kobo_eraser_active and slot.tool == TOOL_TYPE_PEN then
-                slot.tool = TOOL_TYPE_ERASER
+            -- Highlighter works in the same way, but eraser takes priority
+            if slot.tool == TOOL_TYPE_PEN then
+                if self.kobo_eraser_active then
+                    slot.tool = TOOL_TYPE_ERASER
+                elseif self.kobo_highlighter_active then
+                    slot.tool = TOOL_TYPE_HIGHLIGHTER
+                end
             end
 
             logger.dbg("Input:routeStylusEvents: stylus detected in slot", slot.slot,
                        "tool=", slot.tool, "id=", slot.id, "x=", slot.x, "y=", slot.y,
-                       "pen_slot=", self.pen_slot, "kobo_eraser=", self.kobo_eraser_active)
+                       "pen_slot=", self.pen_slot, "kobo_eraser=", self.kobo_eraser_active, "kobo_highlighter=", self.kobo_highlighter_active)
             local dominated = self.stylus_callback(self, slot)
             if dominated then
                 table.insert(dominated_indices, i)
@@ -742,6 +748,12 @@ function Input:handleKeyBoardEv(ev)
     -- We just track the state here; routeStylusEvents will use it
     if ev.code == C.BTN_STYLUS then
         self.kobo_eraser_active = (ev.value == 1)
+    end
+
+    -- Track highlighter state via BTN_STYLUS2 (code 332) on Kobo
+    -- When side button is pressed as the stylus touches screen, Kobo sends BTN_STYLUS2 press
+    if ev.code == C.BTN_STYLUS2 then
+        self.kobo_highlighter_active = (ev.value == 1)
     end
 
     -- Handle stylus tool type for all protocols (pen tip vs eraser end)
