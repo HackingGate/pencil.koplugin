@@ -5,8 +5,9 @@
 This has been tested on:
 
 - Kobo Libra Colour/Kobo Stylus 2/Epub format
+- Linux desktop KOReader with SDL3 pen events and a stylus side button
 
-**This will currently only work on Kobo devices! I will attempt to add other device support by request and at a later date**
+Linux/SDL pen support requires a KOReader build that includes the stylus callback and SDL3 pen-event patches. The SDL path uses standard SDL3 pen events for pen tip input, treats the stylus side button as a temporary eraser while held, and supports eraser-tip reporting when the platform provides it.
 
 If you resize your book while reading it, your annotations will be WONKY. This is something I will eventually address but for now, get your book set before you start writing.
 
@@ -26,9 +27,9 @@ If you resize your book while reading it, your annotations will be WONKY. This i
 
 ## Instructions for Installation
 
-1. Download both the `pencil.koplugin` directory and the `input.lua` file from this repository.
-2. Replace the `/frontend/device/input.lua` with the downloaded file. This enables the plugin to intercept the stylus input, separate it from touch inputs, and detect the eraser end.
-3. Copy the `pencil.koplugin` directory into the `/plugins` directory of KOReader.
+1. Copy the `pencil.koplugin` directory into the `/plugins` directory of KOReader.
+2. For Kobo builds without the stylus callback patch, replace `/frontend/device/input.lua` with the `input.lua` file from this repository.
+3. For Linux/SDL pen devices, use a patched KOReader build instead of replacing only `frontend/device/input.lua`; SDL pen support also needs the KOReader `base/ffi/SDL3.lua` patch.
 
 ## Configuring the Pencil Plugin
 

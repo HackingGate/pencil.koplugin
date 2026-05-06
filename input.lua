@@ -486,6 +486,7 @@ function Input:routeStylusEvents()
         -- On Kobo, ABS_MT_TOOL_TYPE is sent: 0=finger, 1=stylus
         local is_stylus = (slot.tool == TOOL_TYPE_PEN) or
                           (slot.tool == TOOL_TYPE_ERASER) or
+                          (slot.tool == TOOL_TYPE_HIGHLIGHTER) or
                           (self.pen_slot and slot.slot == self.pen_slot)
 
         if is_stylus then
@@ -495,16 +496,19 @@ function Input:routeStylusEvents()
             -- Based on eraser detection pattern from eraser.koplugin by SimonLiu
             -- Highlighter works in the same way, but eraser takes priority
             if slot.tool == TOOL_TYPE_PEN then
-                if self.kobo_eraser_active then
+                local eraser_active = self.stylus_eraser_active or self.kobo_eraser_active
+                local highlighter_active = self.stylus_highlighter_active or self.kobo_highlighter_active
+                if eraser_active then
                     slot.tool = TOOL_TYPE_ERASER
-                elseif self.kobo_highlighter_active then
+                elseif highlighter_active then
                     slot.tool = TOOL_TYPE_HIGHLIGHTER
                 end
             end
 
             logger.dbg("Input:routeStylusEvents: stylus detected in slot", slot.slot,
                        "tool=", slot.tool, "id=", slot.id, "x=", slot.x, "y=", slot.y,
-                       "pen_slot=", self.pen_slot, "kobo_eraser=", self.kobo_eraser_active, "kobo_highlighter=", self.kobo_highlighter_active)
+                       "pen_slot=", self.pen_slot, "eraser=", self.stylus_eraser_active or self.kobo_eraser_active,
+                       "highlighter=", self.stylus_highlighter_active or self.kobo_highlighter_active)
             local dominated = self.stylus_callback(self, slot)
             if dominated then
                 table.insert(dominated_indices, i)
@@ -741,19 +745,18 @@ function Input:handleKeyBoardEv(ev)
         end
     end
 
-    -- Track eraser end state via BTN_STYLUS (code 331) on Kobo
-    -- When eraser end touches screen, Kobo sends BTN_STYLUS press
-    -- This is mapped to "Eraser" in Kobo's event_map
-    -- Discovery based on eraser.koplugin by SimonLiu <simonliu423@gmail.com>
-    -- We just track the state here; routeStylusEvents will use it
-    if ev.code == C.BTN_STYLUS then
-        self.kobo_eraser_active = (ev.value == 1)
-    end
-
-    -- Track highlighter state via BTN_STYLUS2 (code 332) on Kobo
-    -- When side button is pressed as the stylus touches screen, Kobo sends BTN_STYLUS2 press
-    if ev.code == C.BTN_STYLUS2 then
-        self.kobo_highlighter_active = (ev.value == 1)
+    -- On Kobo-style stylus devices, barrel/tool buttons can double as
+    -- eraser/highlighter tool selectors. SDL/Linux pen buttons are handled as
+    -- plain buttons instead, so standard side buttons don't rewrite the tool.
+    local stylus_buttons_select_tool = not (self.device and self.device.isSDL and self.device:isSDL())
+    if stylus_buttons_select_tool then
+        if ev.code == C.BTN_STYLUS then
+            self.stylus_eraser_active = (ev.value == 1)
+            self.kobo_eraser_active = self.stylus_eraser_active
+        elseif ev.code == C.BTN_STYLUS2 then
+            self.stylus_highlighter_active = (ev.value == 1)
+            self.kobo_highlighter_active = self.stylus_highlighter_active
+        end
     end
 
     -- Handle stylus tool type for all protocols (pen tip vs eraser end)
@@ -1812,5 +1815,6 @@ end
 Input.TOOL_TYPE_FINGER = TOOL_TYPE_FINGER  -- 0
 Input.TOOL_TYPE_PEN = TOOL_TYPE_PEN        -- 1
 Input.TOOL_TYPE_ERASER = TOOL_TYPE_ERASER  -- 2
+Input.TOOL_TYPE_HIGHLIGHTER = TOOL_TYPE_HIGHLIGHTER  -- 3
 
 return Input
