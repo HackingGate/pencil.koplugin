@@ -86,6 +86,7 @@ local Pencil = InputContainer:extend{
         [TOOL_HIGHLIGHTER] = {
             width = 20,
             color = nil,  -- Set in init (needs Blitbuffer)
+            color_name = "Gray",
             alpha = 128,
         },
         [TOOL_ERASER] = {
@@ -595,7 +596,11 @@ function Pencil:addRawPoint(x, y)
     if n == 1 then
         -- Draw first point same size as line segments for consistency
         local half_w_draw = math.floor(width / 2)
-        Screen.bb:paintRectRGB32(x - half_w_draw, y - half_w_draw, width, width, color)
+        if self.current_stroke.tool == TOOL_HIGHLIGHTER then
+            self:drawHighlighterSegment(Screen.bb, x, y, x, y, width, color)
+        else
+            Screen.bb:paintRectRGB32(x - half_w_draw, y - half_w_draw, width, width, color)
+        end
         -- Use slightly larger dirty region for refresh padding
         dirty_x = x - half_w
         dirty_y = y - half_w
@@ -2077,7 +2082,11 @@ function Pencil:onDrawTouch(ges)
     local width = tool_settings.width
     local color = tool_settings.color
     local half_w = math.floor(width / 2)
-    Screen.bb:paintRectRGB32(ges.pos.x - half_w, ges.pos.y - half_w, width, width, color)
+    if effective_tool == TOOL_HIGHLIGHTER then
+        self:drawHighlighterSegment(Screen.bb, ges.pos.x, ges.pos.y, ges.pos.x, ges.pos.y, width, color)
+    else
+        Screen.bb:paintRectRGB32(ges.pos.x - half_w, ges.pos.y - half_w, width, width, color)
+    end
 
     return true
 end
@@ -2283,7 +2292,11 @@ function Pencil:onDrawPan(ges)
     elseif n == 1 then
         local p = self.current_stroke.points[1]
         local half_w = math.floor(width / 2)
-        Screen.bb:paintRectRGB32(p.x - half_w, p.y - half_w, width, width, color)
+        if effective_tool == TOOL_HIGHLIGHTER then
+            self:drawHighlighterSegment(Screen.bb, p.x, p.y, p.x, p.y, width, color)
+        else
+            Screen.bb:paintRectRGB32(p.x - half_w, p.y - half_w, width, width, color)
+        end
     end
 
     return true
@@ -2695,29 +2708,34 @@ function Pencil:drawLineSegment(bb, x1, y1, x2, y2, width, color)
     end
 end
 
--- Render a highlighter segment (semi-transparent, wider)
-function Pencil:drawHighlighterSegment(bb, x1, y1, x2, y2, width, color)
+function Pencil:getHighlighterBlendFactor()
+    return G_reader_settings:readSetting("highlight_lighten_factor") or 0.2
+end
+
+function Pencil:drawHighlighterStamp(bb, x, y, width)
+    local half_w = math.floor(width / 2)
+    bb:darkenRect(x - half_w, y - half_w, width, width, self:getHighlighterBlendFactor())
+end
+
+-- Render a highlighter segment with KOReader's highlight-style blending.
+function Pencil:drawHighlighterSegment(bb, x1, y1, x2, y2, width, _color)
     local dx = x2 - x1
     local dy = y2 - y1
     local dist = math.sqrt(dx * dx + dy * dy)
 
-    -- Highlighter is drawn as a lighter gray to simulate transparency on e-ink
-    local highlight_color = color or Blitbuffer.Color8(0xDD)
-
     if dist < 1 then
-        local half_w = math.floor(width / 2)
-        bb:paintRectRGB32(x1 - half_w, y1 - half_w, width, width, highlight_color)
+        self:drawHighlighterStamp(bb, x1, y1, width)
         return
     end
 
-    local steps = math.ceil(dist)
-    local half_w = math.floor(width / 2)
+    local step = math.max(1, math.floor(width / 2))
+    local steps = math.ceil(dist / step)
 
     for i = 0, steps do
-        local t = i / steps
+        local t = math.min(i * step / dist, 1)
         local x = math.floor(x1 + dx * t)
         local y = math.floor(y1 + dy * t)
-        bb:paintRectRGB32(x - half_w, y - half_w, width, width, highlight_color)
+        self:drawHighlighterStamp(bb, x, y, width)
     end
 end
 
@@ -2814,7 +2832,11 @@ function Pencil:renderStroke(bb, stroke)
         -- Single point (dot)
         local p = stroke.points[1]
         local half_w = math.floor(width / 2)
-        bb:paintRectRGB32(p.x - half_w, p.y - half_w, width, width, color)
+        if is_highlighter then
+            self:drawHighlighterSegment(bb, p.x, p.y, p.x, p.y, width, color)
+        else
+            bb:paintRectRGB32(p.x - half_w, p.y - half_w, width, width, color)
+        end
     else
         -- Multiple points - draw line segments
         for i = 2, #stroke.points do
