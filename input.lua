@@ -745,10 +745,12 @@ function Input:handleKeyBoardEv(ev)
         end
     end
 
+    local is_sdl = self.device and self.device.isSDL and self.device:isSDL()
+
     -- On Kobo-style stylus devices, barrel/tool buttons can double as
     -- eraser/highlighter tool selectors. SDL/Linux pen buttons are handled as
     -- plain buttons instead, so standard side buttons don't rewrite the tool.
-    local stylus_buttons_select_tool = not (self.device and self.device.isSDL and self.device:isSDL())
+    local stylus_buttons_select_tool = not is_sdl
     if stylus_buttons_select_tool then
         if ev.code == C.BTN_STYLUS then
             self.stylus_eraser_active = (ev.value == 1)
@@ -759,20 +761,12 @@ function Input:handleKeyBoardEv(ev)
         end
     end
 
-    -- Handle stylus tool type for all protocols (pen tip vs eraser end)
-    if ev.code == C.BTN_TOOL_PEN then
+    -- Handle stylus tool type for Wacom-style devices and SDL synthetic pen events.
+    local stylus_tool_protocol = self.wacom_protocol or is_sdl
+    if stylus_tool_protocol and (ev.code == C.BTN_TOOL_PEN or ev.code == C.BTN_TOOL_RUBBER) then
         self:setupSlotData(self.pen_slot)
         if ev.value == 1 then
-            self:setCurrentMtSlot("tool", TOOL_TYPE_PEN)
-        else
-            self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
-            self.cur_slot = self.main_finger_slot
-        end
-        return
-    elseif ev.code == C.BTN_TOOL_RUBBER then
-        self:setupSlotData(self.pen_slot)
-        if ev.value == 1 then
-            self:setCurrentMtSlot("tool", TOOL_TYPE_ERASER)
+            self:setCurrentMtSlot("tool", ev.code == C.BTN_TOOL_RUBBER and TOOL_TYPE_ERASER or TOOL_TYPE_PEN)
         else
             self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
             self.cur_slot = self.main_finger_slot

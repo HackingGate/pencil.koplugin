@@ -1138,8 +1138,9 @@ function Pencil:togglePenEraser()
 end
 
 function Pencil:isSDLStylusButtonKey(key_str)
+    -- KOReader's SDL event map names BTN_STYLUS/BTN_STYLUS2 as Stylus/Stylus2.
     return Device.isSDL and Device:isSDL()
-        and (key_str:match("Stylus") or key_str:match("Highlighter"))
+        and key_str:match("Stylus")
 end
 
 function Pencil:hasEraserButtonKey()
