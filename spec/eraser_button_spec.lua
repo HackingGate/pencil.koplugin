@@ -35,8 +35,10 @@ local function createMockPencil(strokes, options)
         eraser_button_active = false,
         eraser_button_deleted = nil,
         eraser_button_keys = nil,
+        eraser_tool_active = false,
         pen_x = 0,
         pen_y = 0,
+        swap_eraser_and_highlighter = options.swap_eraser_and_highlighter == true,
         -- Mock enabled state
         _enabled = options.enabled ~= false, -- default to true
         _is_sdl = options.is_sdl == true,
@@ -184,6 +186,13 @@ local function createMockPencil(strokes, options)
             return true
         end
 
+        if (self.swap_eraser_and_highlighter and (key_str:match("Highlighter") or key_str:match("Stylus"))) or (not self.swap_eraser_and_highlighter and (key_str:match("BTN_TOOL_RUBBER") or key_str:match("ToolRubber"))) then
+            self.eraser_button_active = true
+            self.eraser_button_deleted = {}
+            self.eraser_tool_active = true
+            return true
+        end
+
         if not self:isEnabled() then return false end
         return false
     end
@@ -199,6 +208,14 @@ local function createMockPencil(strokes, options)
 
         if self:isSDLStylusButtonKey(key_str) then
             return self:finishEraserButton(key_str)
+        end
+
+        if key_str:match("BTN_TOOL_RUBBER") or key_str:match("ToolRubber") then
+            self.eraser_button_active = false
+            self.eraser_button_deleted = nil
+            self.eraser_button_keys = nil
+            self.eraser_tool_active = false
+            return true
         end
 
         if not self:isEnabled() then return false end
@@ -299,6 +316,7 @@ describe("eraser button mode", function()
             local handled = pencil:onKeyPress({ key = "Stylus" })
             assert.is_true(handled)
             assert.is_true(pencil.eraser_button_active)
+            assert.is_false(pencil.eraser_tool_active)
 
             pencil:handleStylusSlot({}, { id = 1, x = 100, y = 100 })
             assert.equals(0, #pencil.strokes)
@@ -306,7 +324,25 @@ describe("eraser button mode", function()
             handled = pencil:onKeyRelease({ key = "Stylus" })
             assert.is_true(handled)
             assert.is_false(pencil.eraser_button_active)
+            assert.is_false(pencil.eraser_tool_active)
             assert.equals(1, #pencil.undo_stack)
+        end)
+
+        it("keeps SDL Stylus out of swapped physical eraser tool mode", function()
+            local pencil = createMockPencil({}, {
+                is_sdl = true,
+                swap_eraser_and_highlighter = true,
+            })
+
+            local handled = pencil:onKeyPress({ key = "Stylus" })
+            assert.is_true(handled)
+            assert.is_true(pencil.eraser_button_active)
+            assert.is_false(pencil.eraser_tool_active)
+
+            handled = pencil:onKeyRelease({ key = "Stylus" })
+            assert.is_true(handled)
+            assert.is_false(pencil.eraser_button_active)
+            assert.is_false(pencil.eraser_tool_active)
         end)
 
         it("keeps eraser mode active until all held SDL stylus keys release", function()

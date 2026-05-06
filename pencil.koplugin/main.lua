@@ -1196,6 +1196,14 @@ function Pencil:onKeyPress(key)
         return true
     end
 
+    -- Linux/SDL tablet side buttons follow the common PC tablet convention:
+    -- hold the stylus button to erase temporarily instead of entering highlighter mode.
+    if self:isSDLStylusButtonKey(key_str) then
+        logger.info("Pencil: SDL stylus button PRESSED - activating eraser mode")
+        self:startEraserButton(key_str)
+        return true
+    end
+
     -- BTN_TOOL_RUBBER - physical eraser end - works regardless of pencil enabled state
     if (self.swap_eraser_and_highlighter and (key_str:match("Highlighter") or key_str:match("Stylus"))) or (not self.swap_eraser_and_highlighter and (key_str:match("BTN_TOOL_RUBBER") or key_str:match("ToolRubber"))) then
         logger.info("Pencil: BTN_TOOL_RUBBER press - activating eraser mode")
@@ -1217,14 +1225,6 @@ function Pencil:onKeyPress(key)
         self.eraser_button_deleted = nil
         self.eraser_button_keys = nil
         self.eraser_tool_active = false
-        return true
-    end
-
-    -- Linux/SDL tablet side buttons follow the common PC tablet convention:
-    -- hold the stylus button to erase temporarily instead of entering highlighter mode.
-    if self:isSDLStylusButtonKey(key_str) then
-        logger.info("Pencil: SDL stylus button PRESSED - activating eraser mode")
-        self:startEraserButton(key_str)
         return true
     end
 
