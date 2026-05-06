@@ -2145,7 +2145,7 @@ end
 -- Check if this is a stylus/pen event (not finger)
 -- Returns: is_pen (boolean), is_eraser_end (boolean), is_highlighter (boolean)
 function Pencil:isPenInput(ges)
-    if Device:isEmulator() then
+    if Device:isEmulator() and os.getenv("PENCIL_EMULATE_PEN") == "1" then
         return true, false, false
     end
 
