@@ -1500,8 +1500,22 @@ function Input:waitEvent(now, deadline)
                 end
 
                 local timerfd
-                local sec, usec = time.split_s_us(poll_timeout)
-                ok, ev, timerfd = self.input.waitForEvent(sec, usec)
+                local timer_due = false
+                if not with_timerfd then
+                    local timer_now = time.now()
+                    if self.timer_callbacks[1].deadline <= timer_now then
+                        timer_due = true
+                        deadline_is_timer = true
+                        now = timer_now
+                    end
+                end
+
+                if timer_due then
+                    ok, ev = false, C.ETIME
+                else
+                    local sec, usec = time.split_s_us(poll_timeout)
+                    ok, ev, timerfd = self.input.waitForEvent(sec, usec)
+                end
                 -- We got an actual input event, go and process it
                 if ok then break end
 
