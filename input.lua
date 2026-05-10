@@ -486,6 +486,7 @@ function Input:routeStylusEvents()
         -- On Kobo, ABS_MT_TOOL_TYPE is sent: 0=finger, 1=stylus
         local is_stylus = (slot.tool == TOOL_TYPE_PEN) or
                           (slot.tool == TOOL_TYPE_ERASER) or
+                          (slot.tool == TOOL_TYPE_HIGHLIGHTER) or
                           (self.pen_slot and slot.slot == self.pen_slot)
 
         if is_stylus then
@@ -495,16 +496,19 @@ function Input:routeStylusEvents()
             -- Based on eraser detection pattern from eraser.koplugin by SimonLiu
             -- Highlighter works in the same way, but eraser takes priority
             if slot.tool == TOOL_TYPE_PEN then
-                if self.kobo_eraser_active then
+                local eraser_active = self.stylus_eraser_active or self.kobo_eraser_active
+                local highlighter_active = self.stylus_highlighter_active or self.kobo_highlighter_active
+                if eraser_active then
                     slot.tool = TOOL_TYPE_ERASER
-                elseif self.kobo_highlighter_active then
+                elseif highlighter_active then
                     slot.tool = TOOL_TYPE_HIGHLIGHTER
                 end
             end
 
             logger.dbg("Input:routeStylusEvents: stylus detected in slot", slot.slot,
                        "tool=", slot.tool, "id=", slot.id, "x=", slot.x, "y=", slot.y,
-                       "pen_slot=", self.pen_slot, "kobo_eraser=", self.kobo_eraser_active, "kobo_highlighter=", self.kobo_highlighter_active)
+                       "pen_slot=", self.pen_slot, "eraser=", self.stylus_eraser_active or self.kobo_eraser_active,
+                       "highlighter=", self.stylus_highlighter_active or self.kobo_highlighter_active)
             local dominated = self.stylus_callback(self, slot)
             if dominated then
                 table.insert(dominated_indices, i)
@@ -741,35 +745,28 @@ function Input:handleKeyBoardEv(ev)
         end
     end
 
-    -- Track eraser end state via BTN_STYLUS (code 331) on Kobo
-    -- When eraser end touches screen, Kobo sends BTN_STYLUS press
-    -- This is mapped to "Eraser" in Kobo's event_map
-    -- Discovery based on eraser.koplugin by SimonLiu <simonliu423@gmail.com>
-    -- We just track the state here; routeStylusEvents will use it
-    if ev.code == C.BTN_STYLUS then
-        self.kobo_eraser_active = (ev.value == 1)
-    end
+    local is_sdl = self.device and self.device.isSDL and self.device:isSDL()
 
-    -- Track highlighter state via BTN_STYLUS2 (code 332) on Kobo
-    -- When side button is pressed as the stylus touches screen, Kobo sends BTN_STYLUS2 press
-    if ev.code == C.BTN_STYLUS2 then
-        self.kobo_highlighter_active = (ev.value == 1)
-    end
-
-    -- Handle stylus tool type for all protocols (pen tip vs eraser end)
-    if ev.code == C.BTN_TOOL_PEN then
-        self:setupSlotData(self.pen_slot)
-        if ev.value == 1 then
-            self:setCurrentMtSlot("tool", TOOL_TYPE_PEN)
-        else
-            self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
-            self.cur_slot = self.main_finger_slot
+    -- On Kobo-style stylus devices, barrel/tool buttons can double as
+    -- eraser/highlighter tool selectors. SDL/Linux pen buttons are handled as
+    -- plain buttons instead, so standard side buttons don't rewrite the tool.
+    local stylus_buttons_select_tool = not is_sdl
+    if stylus_buttons_select_tool then
+        if ev.code == C.BTN_STYLUS then
+            self.stylus_eraser_active = (ev.value == 1)
+            self.kobo_eraser_active = self.stylus_eraser_active
+        elseif ev.code == C.BTN_STYLUS2 then
+            self.stylus_highlighter_active = (ev.value == 1)
+            self.kobo_highlighter_active = self.stylus_highlighter_active
         end
-        return
-    elseif ev.code == C.BTN_TOOL_RUBBER then
+    end
+
+    -- Handle stylus tool type for Wacom-style devices and SDL synthetic pen events.
+    local stylus_tool_protocol = self.wacom_protocol or is_sdl
+    if stylus_tool_protocol and (ev.code == C.BTN_TOOL_PEN or ev.code == C.BTN_TOOL_RUBBER) then
         self:setupSlotData(self.pen_slot)
         if ev.value == 1 then
-            self:setCurrentMtSlot("tool", TOOL_TYPE_ERASER)
+            self:setCurrentMtSlot("tool", ev.code == C.BTN_TOOL_RUBBER and TOOL_TYPE_ERASER or TOOL_TYPE_PEN)
         else
             self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
             self.cur_slot = self.main_finger_slot
@@ -1503,8 +1500,22 @@ function Input:waitEvent(now, deadline)
                 end
 
                 local timerfd
-                local sec, usec = time.split_s_us(poll_timeout)
-                ok, ev, timerfd = self.input.waitForEvent(sec, usec)
+                local timer_due = false
+                if not with_timerfd then
+                    local timer_now = time.now()
+                    if self.timer_callbacks[1].deadline <= timer_now then
+                        timer_due = true
+                        deadline_is_timer = true
+                        now = timer_now
+                    end
+                end
+
+                if timer_due then
+                    ok, ev = false, C.ETIME
+                else
+                    local sec, usec = time.split_s_us(poll_timeout)
+                    ok, ev, timerfd = self.input.waitForEvent(sec, usec)
+                end
                 -- We got an actual input event, go and process it
                 if ok then break end
 
@@ -1812,5 +1823,6 @@ end
 Input.TOOL_TYPE_FINGER = TOOL_TYPE_FINGER  -- 0
 Input.TOOL_TYPE_PEN = TOOL_TYPE_PEN        -- 1
 Input.TOOL_TYPE_ERASER = TOOL_TYPE_ERASER  -- 2
+Input.TOOL_TYPE_HIGHLIGHTER = TOOL_TYPE_HIGHLIGHTER  -- 3
 
 return Input
