@@ -798,17 +798,12 @@ end
 -- Check if a menu or overlay is shown on top of the reader view.
 -- When true, pen input should pass through so the overlay can handle it.
 function Pencil:isOverlayActive()
-    local stack = UIManager._window_stack
-    if not stack or #stack == 0 then return false end
-    local top = stack[#stack]
-    if top and top.widget then
-        local name = top.widget.name or top.widget.id
-        -- ReaderUI is the document view itself — anything else is an overlay
-        if name ~= "ReaderUI" then
-            return true
-        end
-    end
-    return false
+    local top = UIManager:getTopmostVisibleWidget()
+    if not top then return false end
+    -- ReaderUI is the document view itself — anything else is an overlay.
+    -- getTopmostVisibleWidget skips widgets marked invisible — transient
+    -- decorations that paint but don't capture input, e.g. TrapWidget.
+    return (top.name or top.id) ~= "ReaderUI"
 end
 
 -- Set enabled state (global setting)
