@@ -16,7 +16,8 @@ If you resize your book while reading it, your annotations will be WONKY. This i
 
 - **Pen tip**: Draw annotations on your ebooks
 - **Eraser end**: Flip your stylus over to erase strokes instantly
-- **Color selection**: Hold the pen still to open a color picker with 10 color options
+- **Highlighter**: Hold the stylus side button and drag to highlight; tap the side button to toggle pencil/eraser
+- **Swap Eraser/Highlighter**: Reassign which side button acts as eraser vs. highlighter from the menu
 - **Undo**: Undo your last stroke or eraser action
 - **Clear strokes**: Clear annotations for the current page or the entire document
 - **Annotation grouping**: Strokes are automatically grouped into logical annotations based on timing and proximity
@@ -33,7 +34,8 @@ If you resize your book while reading it, your annotations will be WONKY. This i
 ## Configuring the Pencil Plugin
 
 1. Enable the plugin from the Pencil menu (Top menu > More tools > Pencil > Enabled)
-2. Optionally map actions to gestures in Gesture Manager:
+2. If your stylus's side button mapping is reversed, toggle **Swap Eraser and Highlighter** in the Pencil menu
+3. Optionally map actions to gestures in Gesture Manager:
    - **Pencil: toggle on/off** — enable or disable the plugin
    - **Pencil: toggle pencil/eraser** — switch between tools
    - **Pencil: select pencil** — switch to pencil
@@ -48,6 +50,18 @@ If you're experiencing issues with the plugin, please enable input debug mode in
 ## Experimental Features
 
 Some features are still in development and are hidden behind an experimental toggle. You can find them under **Pencil menu > Experimental**.
+
+### Color picker
+
+When enabled, holding the pen still on the page opens a picker with 10 color options. When disabled, the pen stays on its last-saved color.
+
+**To enable:** Pencil menu > Experimental > Color picker
+
+### Pen width picker
+
+When enabled, the picker also shows pen width options (3, 5, 7, 9), rendered as black bars whose height previews the stroke thickness. **Requires the color picker to also be enabled.**
+
+**To enable:** Pencil menu > Experimental > Pen width picker
 
 ### Bookmark Sync
 
