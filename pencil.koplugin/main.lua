@@ -79,6 +79,12 @@ local Pencil = InputContainer:extend{
     pending_refresh = nil,
     refresh_delay_ms = 600, -- Wait 600ms after last stroke before final refresh
 
+    -- Debounced save - coalesces full O(N) serialization across consecutive strokes.
+    -- Force-flushed on page change, close, and the deferred-work scheduler.
+    pending_save = nil,
+    save_delay_ms = 1500,
+    dirty_groups = nil, -- Set of groups awaiting syncGroupBookmark (id -> group)
+
     -- Tool settings
     tool_settings = {
         [TOOL_PEN] = {
@@ -685,9 +691,9 @@ function Pencil:endRawStroke()
     if self.current_stroke and #self.current_stroke.points >= 1 then
         table.insert(self.strokes, self.current_stroke)
         self:indexStroke(#self.strokes, self.current_stroke.page)
-        self:saveStrokes()
         table.insert(self.undo_stack, { type = "add", stroke_idx = #self.strokes })
         self:assignStrokeToGroup(#self.strokes)
+        self:scheduleDeferredWork()
         if self.input_debug_mode then
             self:writeDebugLog(string.format("endRawStroke: SAVED stroke #%d with %d points, total strokes=%d",
                 #self.strokes, #self.current_stroke.points, #self.strokes))
@@ -1683,6 +1689,48 @@ function Pencil:cancelPendingRefresh()
     end
 end
 
+-- Schedule a debounced save + bookmark flush after writing pauses.
+function Pencil:scheduleDeferredWork()
+    self:cancelPendingSave()
+    self.pending_save = UIManager:scheduleIn(self.save_delay_ms / 1000, function()
+        self.pending_save = nil
+        self:flushDirtyGroups()
+        self:saveStrokes()
+    end)
+end
+
+function Pencil:cancelPendingSave()
+    if self.pending_save then
+        UIManager:unschedule(self.pending_save)
+        self.pending_save = nil
+    end
+end
+
+-- Run any pending deferred work immediately. Called before close, page change,
+-- or any path that must persist state synchronously.
+function Pencil:flushDeferredWork()
+    if not self.pending_save and not (self.dirty_groups and next(self.dirty_groups)) then
+        return
+    end
+    self:cancelPendingSave()
+    self:flushDirtyGroups()
+    self:saveStrokes()
+end
+
+-- Sync bookmarks for any groups marked dirty since the last flush. No-op when
+-- the experimental bookmark sync feature is off or nothing is pending.
+function Pencil:flushDirtyGroups()
+    if not self.dirty_groups then return end
+    if not self.experimental_bookmark_sync then
+        self.dirty_groups = nil
+        return
+    end
+    for _, group in pairs(self.dirty_groups) do
+        self:syncGroupBookmark(group)
+    end
+    self.dirty_groups = nil
+end
+
 -- Reset color picker tracking (called when pen moves too far)
 function Pencil:resetColorPickerTracking()
     self.color_picker_start_x = nil
@@ -2662,7 +2710,7 @@ function Pencil:assignStrokeToGroup(stroke_idx, skip_bookmark)
         end
         best_group.tool = hl_count > pen_count and TOOL_HIGHLIGHTER or TOOL_PEN
         if not skip_bookmark then
-            self:syncGroupBookmark(best_group)
+            self:markGroupDirty(best_group)
         end
     else
         -- Create new group
@@ -2677,9 +2725,17 @@ function Pencil:assignStrokeToGroup(stroke_idx, skip_bookmark)
         }
         table.insert(self.annotation_groups, group)
         if not skip_bookmark then
-            self:syncGroupBookmark(group)
+            self:markGroupDirty(group)
         end
     end
+end
+
+-- Mark a group as needing a bookmark sync on the next deferred-work flush.
+-- Keeps the heavy getPageXPointer / annotation insertion off the writing path.
+function Pencil:markGroupDirty(group)
+    if not self.experimental_bookmark_sync then return end
+    self.dirty_groups = self.dirty_groups or {}
+    self.dirty_groups[group.id] = group
 end
 
 -- Rebuild all annotation groups from scratch by re-running the grouping algorithm
@@ -2991,25 +3047,31 @@ function Pencil:eraseAtPoint(x, y, page)
     local deleted = {}
     local indices_to_remove = {}
 
-    -- Find strokes on the current page that intersect with eraser point
-    for i, stroke in ipairs(self.strokes) do
-        -- Debug: log stroke bounds
-        if self.input_debug_mode and stroke.points and #stroke.points > 0 then
-            local min_x, max_x, min_y, max_y = stroke.points[1].x, stroke.points[1].x, stroke.points[1].y, stroke.points[1].y
-            for _, pt in ipairs(stroke.points) do
-                if pt.x < min_x then min_x = pt.x end
-                if pt.x > max_x then max_x = pt.x end
-                if pt.y < min_y then min_y = pt.y end
-                if pt.y > max_y then max_y = pt.y end
-            end
-            self:writeDebugLog(string.format("ERASE: stroke %d bounds: (%d-%d, %d-%d), eraser at (%d,%d) threshold=%d",
-                i, min_x, max_x, min_y, max_y, x, y, eraser_width))
-        end
-        if stroke and stroke.page == page and self:isPointNearStroke(x, y, stroke, eraser_width) then
-            table.insert(deleted, stroke)
-            table.insert(indices_to_remove, i)
-            if self.input_debug_mode then
-                self:writeDebugLog(string.format("ERASE: found stroke %d to delete", i))
+    -- Iterate only strokes on the current page via the page index. Keeps the
+    -- per-sample erase cost O(strokes-on-page) instead of O(total-strokes).
+    local page_indices = self.page_strokes and self.page_strokes[page] or nil
+    if page_indices then
+        for _, i in ipairs(page_indices) do
+            local stroke = self.strokes[i]
+            if stroke then
+                if self.input_debug_mode and stroke.points and #stroke.points > 0 then
+                    local min_x, max_x, min_y, max_y = stroke.points[1].x, stroke.points[1].x, stroke.points[1].y, stroke.points[1].y
+                    for _, pt in ipairs(stroke.points) do
+                        if pt.x < min_x then min_x = pt.x end
+                        if pt.x > max_x then max_x = pt.x end
+                        if pt.y < min_y then min_y = pt.y end
+                        if pt.y > max_y then max_y = pt.y end
+                    end
+                    self:writeDebugLog(string.format("ERASE: stroke %d bounds: (%d-%d, %d-%d), eraser at (%d,%d) threshold=%d",
+                        i, min_x, max_x, min_y, max_y, x, y, eraser_width))
+                end
+                if self:isPointNearStroke(x, y, stroke, eraser_width) then
+                    table.insert(deleted, stroke)
+                    table.insert(indices_to_remove, i)
+                    if self.input_debug_mode then
+                        self:writeDebugLog(string.format("ERASE: found stroke %d to delete", i))
+                    end
+                end
             end
         end
     end
@@ -3261,6 +3323,9 @@ function Pencil:onCloseDocument()
 
     -- Cancel any pending refresh
     self:cancelPendingRefresh()
+    -- Drop any scheduled debounced save - we save unconditionally below.
+    self:cancelPendingSave()
+    self.dirty_groups = nil
 
     -- Save any in-progress stroke
     if self.current_stroke and #self.current_stroke.points >= 2 then
@@ -3325,11 +3390,18 @@ end
 function Pencil:onPageUpdate(pageno)
     -- Clear any in-progress stroke when page changes
     if self.current_stroke and #self.current_stroke.points >= 2 then
-        -- Save the stroke before clearing
+        -- Save the stroke before clearing. The inline saveStrokes below covers
+        -- everything in self.strokes, so drop any queued debounced save first.
+        self:cancelPendingSave()
         table.insert(self.strokes, self.current_stroke)
         self:indexStroke(#self.strokes, self.current_stroke.page)
         table.insert(self.undo_stack, { type = "add", stroke_idx = #self.strokes })
+        self:flushDirtyGroups()
         self:saveStrokes()
+    else
+        -- No in-progress stroke, but a debounced save may still be queued from
+        -- earlier strokes on this page. Persist it before navigating away.
+        self:flushDeferredWork()
     end
     self.current_stroke = nil
     self.eraser_deleted = nil
@@ -3339,10 +3411,14 @@ end
 function Pencil:onUpdatePos()
     -- Clear any in-progress stroke when position changes
     if self.current_stroke and #self.current_stroke.points >= 2 then
+        self:cancelPendingSave()
         table.insert(self.strokes, self.current_stroke)
         self:indexStroke(#self.strokes, self.current_stroke.page)
         table.insert(self.undo_stack, { type = "add", stroke_idx = #self.strokes })
+        self:flushDirtyGroups()
         self:saveStrokes()
+    else
+        self:flushDeferredWork()
     end
     self.current_stroke = nil
     self.eraser_deleted = nil
