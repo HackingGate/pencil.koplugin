@@ -341,5 +341,59 @@ describe("Annotation grouping logic", function()
         assert.equals(100, bbox.x1)
         assert.equals(100, bbox.y1)
     end)
+end)
+
+describe("Pencil:getGroupColor", function()
+
+    -- Mock of the same getGroupColor logic in main.lua, kept in sync.
+    local function make_pencil_with_color()
+        local p = { strokes = {} }
+        function p:getGroupColor(group)
+            if not group or not group.stroke_indices then return nil end
+            for _, idx in ipairs(group.stroke_indices) do
+                local stroke = self.strokes[idx]
+                if stroke and stroke.color then
+                    return stroke.color
+                end
+            end
+            return nil
+        end
+        return p
+    end
+
+    it("returns nil for a nil group", function()
+        local p = make_pencil_with_color()
+        assert.is_nil(p:getGroupColor(nil))
+    end)
+
+    it("returns nil for a group with no stroke_indices", function()
+        local p = make_pencil_with_color()
+        assert.is_nil(p:getGroupColor({}))
+    end)
+
+    it("returns the first stroke's color", function()
+        local p = make_pencil_with_color()
+        p.strokes[1] = { color = "red" }
+        p.strokes[2] = { color = "blue" }
+        local group = { stroke_indices = { 1, 2 } }
+        assert.equals("red", p:getGroupColor(group))
+    end)
+
+    it("skips strokes that are missing or have no color", function()
+        local p = make_pencil_with_color()
+        p.strokes[1] = { color = nil }
+        p.strokes[2] = nil
+        p.strokes[3] = { color = "green" }
+        local group = { stroke_indices = { 1, 2, 3 } }
+        assert.equals("green", p:getGroupColor(group))
+    end)
+
+    it("returns nil when no stroke in the group has a color", function()
+        local p = make_pencil_with_color()
+        p.strokes[1] = { color = nil }
+        p.strokes[2] = { color = nil }
+        local group = { stroke_indices = { 1, 2 } }
+        assert.is_nil(p:getGroupColor(group))
+    end)
 
 end)

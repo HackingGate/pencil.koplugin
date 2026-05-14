@@ -195,4 +195,116 @@ describe("Geometry", function()
 
     end)
 
+    describe("bboxExpand", function()
+        it("grows the box by margin on each side", function()
+            local result = Geometry.bboxExpand({ x0 = 10, y0 = 20, x1 = 30, y1 = 40 }, 5)
+            assert.equals(5, result.x0)
+            assert.equals(15, result.y0)
+            assert.equals(35, result.x1)
+            assert.equals(45, result.y1)
+        end)
+
+        it("supports zero margin", function()
+            local result = Geometry.bboxExpand({ x0 = 0, y0 = 0, x1 = 10, y1 = 10 }, 0)
+            assert.equals(0, result.x0)
+            assert.equals(10, result.x1)
+        end)
+    end)
+
+    describe("bboxClampToScreen", function()
+        it("returns the box unchanged when fully inside screen", function()
+            local result = Geometry.bboxClampToScreen({ x0 = 10, y0 = 20, x1 = 100, y1 = 200 }, 500, 500)
+            assert.equals(10, result.x0)
+            assert.equals(20, result.y0)
+            assert.equals(100, result.x1)
+            assert.equals(200, result.y1)
+        end)
+
+        it("clamps negative coordinates to zero", function()
+            local result = Geometry.bboxClampToScreen({ x0 = -50, y0 = -30, x1 = 100, y1 = 100 }, 500, 500)
+            assert.equals(0, result.x0)
+            assert.equals(0, result.y0)
+            assert.equals(100, result.x1)
+            assert.equals(100, result.y1)
+        end)
+
+        it("clamps coordinates beyond screen to screen dimensions", function()
+            local result = Geometry.bboxClampToScreen({ x0 = 100, y0 = 200, x1 = 600, y1 = 700 }, 500, 500)
+            assert.equals(100, result.x0)
+            assert.equals(200, result.y0)
+            assert.equals(500, result.x1)
+            assert.equals(500, result.y1)
+        end)
+    end)
+
+    describe("captureStripRect", function()
+        local sw, sh = 1264, 1680
+        local v_margin = 24
+        local min_h = 350
+
+        it("returns a full-screen-width strip", function()
+            local bbox = { y0 = 800, y1 = 900 }
+            local rect = Geometry.captureStripRect(bbox, sw, sh, v_margin, min_h)
+            assert.equals(0, rect.x0)
+            assert.equals(sw, rect.x1)
+        end)
+
+        it("uses bbox + 2*v_margin when that exceeds min height", function()
+            local bbox = { y0 = 800, y1 = 1200 }  -- 400 tall
+            local rect = Geometry.captureStripRect(bbox, sw, sh, v_margin, min_h)
+            assert.equals(400 + 2 * v_margin, rect.y1 - rect.y0)
+        end)
+
+        it("enforces min height for tiny bboxes", function()
+            local bbox = { y0 = 800, y1 = 810 }  -- 10 tall, +48 margin = 58
+            local rect = Geometry.captureStripRect(bbox, sw, sh, v_margin, min_h)
+            assert.equals(min_h, rect.y1 - rect.y0)
+        end)
+
+        it("centers the strip on the bbox center", function()
+            local bbox = { y0 = 800, y1 = 810 }
+            local rect = Geometry.captureStripRect(bbox, sw, sh, v_margin, min_h)
+            local center = (rect.y0 + rect.y1) / 2
+            -- bbox center is 805; strip is centered there (within rounding)
+            assert.is_true(math.abs(center - 805) <= 1)
+        end)
+
+        it("shifts strip down (not clipped) when bbox is near the top", function()
+            local bbox = { y0 = 20, y1 = 30 }  -- center at 25, strip 350 tall
+            local rect = Geometry.captureStripRect(bbox, sw, sh, v_margin, min_h)
+            assert.equals(0, rect.y0)
+            assert.equals(min_h, rect.y1 - rect.y0)
+        end)
+
+        it("shifts strip up (not clipped) when bbox is near the bottom", function()
+            local bbox = { y0 = sh - 30, y1 = sh - 20 }
+            local rect = Geometry.captureStripRect(bbox, sw, sh, v_margin, min_h)
+            assert.equals(sh, rect.y1)
+            assert.equals(min_h, rect.y1 - rect.y0)
+        end)
+
+        it("caps strip at screen height when min_h exceeds screen", function()
+            local rect = Geometry.captureStripRect(
+                { y0 = 100, y1 = 200 }, sw, 200, v_margin, min_h)
+            assert.equals(0, rect.y0)
+            assert.equals(200, rect.y1)
+        end)
+
+        it("returns a strip within screen bounds in all cases", function()
+            local cases = {
+                { y0 = 0, y1 = 0 },         -- single-point at top corner
+                { y0 = sh, y1 = sh },        -- single-point at bottom corner
+                { y0 = sh / 2, y1 = sh / 2 + 5 },  -- middle
+                { y0 = -50, y1 = 50 },       -- bbox partially above screen
+                { y0 = sh - 50, y1 = sh + 50 },  -- bbox partially below screen
+            }
+            for _, bbox in ipairs(cases) do
+                local rect = Geometry.captureStripRect(bbox, sw, sh, v_margin, min_h)
+                assert.is_true(rect.y0 >= 0)
+                assert.is_true(rect.y1 <= sh)
+                assert.is_true(rect.y1 > rect.y0)
+            end
+        end)
+    end)
+
 end)
