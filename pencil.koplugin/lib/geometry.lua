@@ -111,4 +111,64 @@ function Geometry.bboxUnion(a, b)
     }
 end
 
+--- Expand a bounding box by margin pixels on each side.
+-- @param bbox table {x0, y0, x1, y1}
+-- @param margin number pixels to expand on each side
+-- @return table {x0, y0, x1, y1}
+function Geometry.bboxExpand(bbox, margin)
+    return {
+        x0 = bbox.x0 - margin,
+        y0 = bbox.y0 - margin,
+        x1 = bbox.x1 + margin,
+        y1 = bbox.y1 + margin,
+    }
+end
+
+--- Clamp a bounding box to fit within screen bounds.
+-- @param bbox table {x0, y0, x1, y1}
+-- @param sw number screen width
+-- @param sh number screen height
+-- @return table {x0, y0, x1, y1}
+function Geometry.bboxClampToScreen(bbox, sw, sh)
+    return {
+        x0 = math.max(0, math.min(bbox.x0, sw)),
+        y0 = math.max(0, math.min(bbox.y0, sh)),
+        x1 = math.max(0, math.min(bbox.x1, sw)),
+        y1 = math.max(0, math.min(bbox.y1, sh)),
+    }
+end
+
+--- Compute a full-screen-width capture strip rect for an annotation bbox.
+-- The strip vertically encloses the bbox plus v_margin on each side, is
+-- floored at min_h px tall (extending around the bbox center), and is
+-- shifted back onto the screen if a side runs off so the min-height
+-- contract is preserved. Finally clamped to the screen.
+-- @param bbox table {y0, y1} (x ignored; strip is always full-width)
+-- @param sw number screen width
+-- @param sh number screen height
+-- @param v_margin number padding above/below the bbox before min_h applies
+-- @param min_h number minimum strip height (legibility floor)
+-- @return table {x0, y0, x1, y1} where x0=0 and x1=sw
+function Geometry.captureStripRect(bbox, sw, sh, v_margin, min_h)
+    local bbox_h = bbox.y1 - bbox.y0
+    local strip_h = math.max(bbox_h + 2 * v_margin, min_h)
+    strip_h = math.min(strip_h, sh)
+    local cy = (bbox.y0 + bbox.y1) / 2
+    local y0 = math.floor(cy - strip_h / 2)
+    local y1 = math.floor(cy + strip_h / 2)
+    -- Shift back onscreen rather than clamp-and-chop, so a near-edge bbox
+    -- still produces a min_h-tall strip (when screen has room for it).
+    if y0 < 0 then
+        y1 = y1 - y0
+        y0 = 0
+    end
+    if y1 > sh then
+        y0 = y0 - (y1 - sh)
+        y1 = sh
+    end
+    y0 = math.max(0, y0)
+    y1 = math.min(sh, y1)
+    return { x0 = 0, y0 = y0, x1 = sw, y1 = y1 }
+end
+
 return Geometry
