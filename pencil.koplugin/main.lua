@@ -47,6 +47,9 @@ local COLOR_PICKER_TOLERANCE_PIXELS = 15  -- How many pixels pen can move while 
 -- Annotation grouping constants
 local GROUP_TIME_THRESHOLD_S = 10   -- seconds between strokes to be grouped
 local GROUP_SPATIAL_THRESHOLD = 200 -- pixels between bboxes to be grouped
+local PEN_PRESSURE_MAX = 1024
+local PEN_PRESSURE_MIN_WIDTH_FACTOR = 0.4
+local PEN_PRESSURE_MAX_WIDTH_FACTOR = 1.6
 
 local Pencil = InputContainer:extend{
     name = "pencil_annotation",
@@ -309,9 +312,31 @@ function Pencil:transformCoordinates(x, y)
     return PencilGeometry.transformForRotation(x, y, rotation, Screen:getWidth(), Screen:getHeight())
 end
 
+function Pencil:getPressureAdjustedWidth(base_width, pressure)
+    if not pressure then
+        return base_width
+    end
+
+    local normalized = tonumber(pressure)
+    if not normalized then
+        return base_width
+    end
+
+    normalized = normalized / PEN_PRESSURE_MAX
+    if normalized < 0 then
+        normalized = 0
+    elseif normalized > 1 then
+        normalized = 1
+    end
+
+    local factor = PEN_PRESSURE_MIN_WIDTH_FACTOR
+        + normalized * (PEN_PRESSURE_MAX_WIDTH_FACTOR - PEN_PRESSURE_MIN_WIDTH_FACTOR)
+    return math.max(1, math.floor(base_width * factor + 0.5))
+end
+
 
 -- Handle a stylus slot from the callback
--- slot = {slot=N, id=N, x=N, y=N, tool=N, timev=timestamp}
+-- slot = {slot=N, id=N, x=N, y=N, tool=N, pressure=N, timev=timestamp}
 -- id >= 0 means contact active, id == -1 means contact lifted
 function Pencil:handleStylusSlot(input, slot)
     -- Tool types from Linux input subsystem
@@ -321,8 +346,8 @@ function Pencil:handleStylusSlot(input, slot)
 
     -- Debug logging at the very start to see slot.tool
     if self.input_debug_mode then
-        self:writeDebugLog(string.format("STYLUS SLOT: id=%d x=%d y=%d tool=%d eraser_active=%s",
-            slot.id or -1, slot.x or 0, slot.y or 0, slot.tool or -1,
+        self:writeDebugLog(string.format("STYLUS SLOT: id=%d x=%d y=%d tool=%d pressure=%s eraser_active=%s",
+            slot.id or -1, slot.x or 0, slot.y or 0, slot.tool or -1, tostring(slot.pressure),
             tostring(self.eraser_button_active)))
     end
 
@@ -381,9 +406,9 @@ function Pencil:handleStylusSlot(input, slot)
 
     -- Log in debug mode
     if self.input_debug_mode then
-        self:writeDebugLog(string.format("STYLUS: slot=%d id=%d x=%d y=%d tool=%d pen_down=%s tool=%s",
+        self:writeDebugLog(string.format("STYLUS: slot=%d id=%d x=%d y=%d tool=%d pressure=%s pen_down=%s tool=%s",
             slot.slot or -1, slot.id or -1, slot.x or 0, slot.y or 0, slot.tool or -1,
-            tostring(self.pen_down), self.current_tool))
+            tostring(slot.pressure), tostring(self.pen_down), self.current_tool))
     end
 
     -- Determine effective tool:
@@ -523,7 +548,7 @@ function Pencil:handleStylusSlot(input, slot)
                         self:resetColorPickerTracking()
                     end
                 end
-                self:addRawPoint(x, y)
+                self:addRawPoint(x, y, slot.pressure)
                 self.pen_x = x
                 self.pen_y = y
             end
@@ -583,17 +608,23 @@ function Pencil:startRawStroke()
 end
 
 -- Add a point from raw input and draw it
-function Pencil:addRawPoint(x, y)
+function Pencil:addRawPoint(x, y, pressure)
     if not self.current_stroke then return end
 
     local point = { x = x, y = y }
+    local width = self.current_stroke.width
+    local point_width = width
+    if self.current_stroke.tool == TOOL_PEN and pressure ~= nil then
+        point.pressure = pressure
+        point.width = self:getPressureAdjustedWidth(width, pressure)
+        point_width = point.width
+    end
+
     table.insert(self.current_stroke.points, point)
 
     local n = #self.current_stroke.points
 
-    local width = self.current_stroke.width
     local color = self.current_stroke.color
-    local half_w = math.floor(width / 2) + 2  -- padding for antialiasing
 
     -- Reinvert color in night mode (if it's not black or gray)
     if Screen.night_mode and self.current_stroke.color_name ~= "Black" and self.current_stroke.color_name ~= "Gray" then
@@ -604,26 +635,31 @@ function Pencil:addRawPoint(x, y)
     local dirty_x, dirty_y, dirty_w, dirty_h
     if n == 1 then
         -- Draw first point same size as line segments for consistency
-        local half_w_draw = math.floor(width / 2)
-        Screen.bb:paintRectRGB32(x - half_w_draw, y - half_w_draw, width, width, color)
+        local half_w_draw = math.floor(point_width / 2)
+        local half_w = half_w_draw + 2  -- padding for antialiasing
+        Screen.bb:paintRectRGB32(x - half_w_draw, y - half_w_draw, point_width, point_width, color)
         -- Use slightly larger dirty region for refresh padding
         dirty_x = x - half_w
         dirty_y = y - half_w
-        dirty_w = width + 4
-        dirty_h = width + 4
+        dirty_w = point_width + 4
+        dirty_h = point_width + 4
     elseif n >= 2 then
         local p1 = self.current_stroke.points[n - 1]
         local p2 = self.current_stroke.points[n]
+        local p1_width = p1.width or width
+        local p2_width = p2.width or width
         if self.current_stroke.tool == TOOL_HIGHLIGHTER then
             self:drawHighlighterSegment(Screen.bb, p1.x, p1.y, p2.x, p2.y, width, color)
         else
-            self:drawLineSegment(Screen.bb, p1.x, p1.y, p2.x, p2.y, width, color)
+            self:drawLineSegment(Screen.bb, p1.x, p1.y, p2.x, p2.y, p1_width, color, p2_width)
         end
         -- Calculate bounding box of the segment
+        local segment_width = math.max(p1_width, p2_width)
+        local half_w = math.floor(segment_width / 2) + 2  -- padding for antialiasing
         dirty_x = math.min(p1.x, p2.x) - half_w
         dirty_y = math.min(p1.y, p2.y) - half_w
-        dirty_w = math.abs(p2.x - p1.x) + width + 4
-        dirty_h = math.abs(p2.y - p1.y) + width + 4
+        dirty_w = math.abs(p2.x - p1.x) + segment_width + 4
+        dirty_h = math.abs(p2.y - p1.y) + segment_width + 4
     end
 
     -- Accumulate dirty region for batch refresh
@@ -2731,32 +2767,36 @@ function Pencil:clearAllStrokes()
 end
 
 -- Render a line segment using rectangles (since BlitBuffer has no native line drawing)
-function Pencil:drawLineSegment(bb, x1, y1, x2, y2, width, color)
+function Pencil:drawLineSegment(bb, x1, y1, x2, y2, width, color, width2)
+    width2 = width2 or width
     local dx = x2 - x1
     local dy = y2 - y1
     local dist = math.sqrt(dx * dx + dy * dy)
 
     if dist < 1 then
         -- Just draw a single point
-        local half_w = math.floor(width / 2)
-        bb:paintRectRGB32(x1 - half_w, y1 - half_w, width, width, color)
+        local point_width = math.max(width, width2)
+        local half_w = math.floor(point_width / 2)
+        bb:paintRectRGB32(x1 - half_w, y1 - half_w, point_width, point_width, color)
         return
     end
 
     -- Step along the line drawing small rectangles
     local steps = math.ceil(dist)
-    local half_w = math.floor(width / 2)
 
     for i = 0, steps do
         local t = i / steps
         local x = math.floor(x1 + dx * t)
         local y = math.floor(y1 + dy * t)
-        bb:paintRectRGB32(x - half_w, y - half_w, width, width, color)
+        local step_width = math.max(1, math.floor(width + (width2 - width) * t + 0.5))
+        local half_w = math.floor(step_width / 2)
+        bb:paintRectRGB32(x - half_w, y - half_w, step_width, step_width, color)
     end
 end
 
 -- Render a highlighter segment (semi-transparent, wider)
-function Pencil:drawHighlighterSegment(bb, x1, y1, x2, y2, width, color)
+function Pencil:drawHighlighterSegment(bb, x1, y1, x2, y2, width, color, width2)
+    width2 = width2 or width
     local dx = x2 - x1
     local dy = y2 - y1
     local dist = math.sqrt(dx * dx + dy * dy)
@@ -2765,19 +2805,21 @@ function Pencil:drawHighlighterSegment(bb, x1, y1, x2, y2, width, color)
     local highlight_color = color or Blitbuffer.Color8(0xDD)
 
     if dist < 1 then
-        local half_w = math.floor(width / 2)
-        bb:paintRectRGB32(x1 - half_w, y1 - half_w, width, width, highlight_color)
+        local point_width = math.max(width, width2)
+        local half_w = math.floor(point_width / 2)
+        bb:paintRectRGB32(x1 - half_w, y1 - half_w, point_width, point_width, highlight_color)
         return
     end
 
     local steps = math.ceil(dist)
-    local half_w = math.floor(width / 2)
 
     for i = 0, steps do
         local t = i / steps
         local x = math.floor(x1 + dx * t)
         local y = math.floor(y1 + dy * t)
-        bb:paintRectRGB32(x - half_w, y - half_w, width, width, highlight_color)
+        local step_width = math.max(1, math.floor(width + (width2 - width) * t + 0.5))
+        local half_w = math.floor(step_width / 2)
+        bb:paintRectRGB32(x - half_w, y - half_w, step_width, step_width, highlight_color)
     end
 end
 
@@ -2873,8 +2915,9 @@ function Pencil:renderStroke(bb, stroke)
     if #stroke.points == 1 then
         -- Single point (dot)
         local p = stroke.points[1]
-        local half_w = math.floor(width / 2)
-        bb:paintRectRGB32(p.x - half_w, p.y - half_w, width, width, color)
+        local point_width = p.width or width
+        local half_w = math.floor(point_width / 2)
+        bb:paintRectRGB32(p.x - half_w, p.y - half_w, point_width, point_width, color)
     else
         -- Multiple points - draw line segments
         for i = 2, #stroke.points do
@@ -2883,7 +2926,7 @@ function Pencil:renderStroke(bb, stroke)
             if is_highlighter then
                 self:drawHighlighterSegment(bb, p1.x, p1.y, p2.x, p2.y, width, color)
             else
-                self:drawLineSegment(bb, p1.x, p1.y, p2.x, p2.y, width, color)
+                self:drawLineSegment(bb, p1.x, p1.y, p2.x, p2.y, p1.width or width, color, p2.width or width)
             end
         end
     end
